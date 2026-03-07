@@ -1,0 +1,8 @@
+# Fine-tuning dependencies — NOT needed for serving/inference
+# Install separately only for model training:
+#   pip install -r requirements_finetune.txt
+unsloth
+transformers
+torch
+accelerate
+bitsandbytes

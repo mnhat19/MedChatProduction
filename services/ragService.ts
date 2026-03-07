@@ -3,7 +3,8 @@
  * Connects React frontend to Python RAG backend
  */
 
-const RAG_API_URL = 'http://localhost:8001/api';
+// Use VITE_RAG_API_URL for production deploy; falls back to localhost for local dev
+const RAG_API_URL = (import.meta.env.VITE_RAG_API_URL ?? 'http://localhost:8001') + '/api';
 
 export interface Disease {
   id: string;
@@ -39,10 +40,9 @@ export interface EvaluationResult {
   standard: string;
   evaluation: string;
   sources: {
-    content: string;
-    chunk_title: string;
-    section_title: string;
-    source_file: string;
+    file: string;
+    title: string;
+    section: string;
   }[];
 }
 

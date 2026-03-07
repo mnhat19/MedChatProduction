@@ -1,5 +1,5 @@
-import React, { useState, useEffect, useCallback } from 'react';
-import { Message, TrainingSession, CaseConfig, DiagnosisSubmission, RAGDiagnosisSubmission, RAGEvaluationResult } from './types';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
+import { Message, TrainingSession, CaseConfig, DiagnosisSubmission, RAGDiagnosisSubmission, RAGDiagnosisData, RAGEvaluationResult } from './types';
 import { MIN_INTERACTION_TURNS, CLINICAL_SYSTEMS, DIFFICULTY_LEVELS, DISEASE_CATEGORIES, COMMON_DISEASES } from './constants';
 import { sendMessageStream, generateCase, evaluateSession } from './services/geminiService';
 import { ragService, Disease } from './services/ragService';
@@ -42,12 +42,36 @@ const App: React.FC = () => {
 
   // Save to local storage whenever sessions change
   useEffect(() => {
-    localStorage.setItem('pediatric_training_sessions', JSON.stringify(sessions));
+    try {
+      // Keep only the 50 most recent sessions to prevent quota overflow
+      const toSave = sessions.slice(0, 50);
+      localStorage.setItem('pediatric_training_sessions', JSON.stringify(toSave));
+    } catch (e) {
+      if (e instanceof DOMException && e.name === 'QuotaExceededError') {
+        // Prune oldest half and retry
+        try {
+          const pruned = sessions.slice(0, Math.floor(sessions.length / 2));
+          localStorage.setItem('pediatric_training_sessions', JSON.stringify(pruned));
+          setSessions(pruned);
+          console.warn('[Storage] Quota exceeded — pruned old sessions');
+        } catch {
+          console.error('[Storage] Unable to save sessions even after pruning');
+        }
+      } else {
+        console.error('[Storage] Failed to save sessions:', e);
+      }
+    }
   }, [sessions]);
 
   const currentSession = sessions.find(s => s.id === currentSessionId);
   const messages = currentSession?.messages || [];
   const interactionCount = messages.filter(m => m.role === 'user').length;
+
+  // Scroll to bottom ref
+  const messagesEndRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [messages]);
 
   // Start a new case
   const handleStartCase = useCallback(async (config: CaseConfig) => {
@@ -177,7 +201,7 @@ const App: React.FC = () => {
         ageUnit: 'years' as const,
         gender: 'male' as const,
         chiefComplaint: disease.name,
-        clinicalSystem: 'pediatrics' as const,
+        clinicalSystem: 'infectious' as const,  // RAG mode — actual system comes from the disease
         difficulty: 'medium' as const,
         caseType: 'customised' as const,
       };
@@ -332,14 +356,14 @@ const App: React.FC = () => {
     }
   };
 
-  const handleSubmitRAGDiagnosis = async (diagnosis: RAGDiagnosisSubmission) => {
+  const handleSubmitRAGDiagnosis = async (diagnosis: RAGDiagnosisData) => {
     if (!currentSession || !currentSession.isRAGMode || !currentSession.ragSessionId) return;
 
     setShowRAGDiagnosisForm(false);
     setShowFeedbackPanel(true);
     setIsEvaluating(true);
 
-    const diagnosisWithTimestamp = {
+    const diagnosisWithTimestamp: RAGDiagnosisSubmission = {
       ...diagnosis,
       submittedAt: Date.now(),
     };
@@ -621,7 +645,7 @@ const App: React.FC = () => {
                       <MessageBubble key={msg.id} message={msg} />
                     ))
                   )}
-                  <div ref={(el) => { if(el) el.scrollIntoView({ behavior: 'smooth' }) }} />
+                  <div ref={messagesEndRef} />
                 </div>
             )}
           </div>

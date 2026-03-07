@@ -1,0 +1,36 @@
+# Render.com deployment — Free tier Web Service
+# Free plan: 750 h/month (24/7 with UptimeRobot keep-alive pinging /api/health)
+# RAM: 512 MB — sufficient for FAISS CPU + Groq LLM (no GPU needed)
+
+services:
+  - type: web
+    name: medchat-backend
+    env: python
+    region: singapore       # closest to Vietnam
+    plan: free
+
+    # Build: install Python deps, then pre-build the FAISS index
+    buildCommand: |
+      pip install -r rag_project/requirements_api.txt
+      cd rag_project && python src/build_faiss.py
+
+    # Start from rag_project/ so dotenv finds .env and relative paths resolve
+    startCommand: cd rag_project && python api_server_fastapi.py
+
+    healthCheckPath: /api/health
+
+    envVars:
+      # ── Set these in the Render dashboard (Environment tab) ──
+      - key: GROQ_API_KEY_1
+        sync: false          # enter your key manually in Render → never stored in git
+      - key: GROQ_API_KEY_2
+        sync: false
+      - key: GROQ_MODEL
+        value: llama-3.3-70b-versatile
+      - key: GOOGLE_API_KEY
+        sync: false
+      - key: ALLOWED_ORIGINS
+        sync: false          # set to your Vercel URL: https://your-app.vercel.app
+      # ── Infra settings ──
+      - key: PYTHONUNBUFFERED
+        value: "1"           # show logs in real-time in Render dashboard

@@ -1,166 +1,104 @@
-from rag_chain import RAGChain
-from vector_store import VectorStoreManager
-from data_loader import DataLoader
-from config import Config
-from langchain_google_genai import ChatGoogleGenerativeAI
+﻿"""
+DoctorEvaluator — uses Groq LLM (via shared GroqKeyManager) for:
+  1. generate_case()           : 1 LLM call
+  2. detailed_evaluation()     : 1 LLM call  (compact JSON, ~4 fields)
+
+RAG queries reduced:
+  - find_symptoms              : 3 → 1 combined query
+  - get_detailed_standard_knowledge : 6 → 2 combined queries
+Total LLM calls per start-case: 1(symptoms RAG) + 2(standard RAG) + 1(case) = 4
+Total LLM calls per evaluate  : 2(standard RAG) + 1(eval) = 3
+"""
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import Dict, Tuple, List
+from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception
+from rag_chain import RAGChain, get_key_manager, _is_rate_limit
+
 
 class DoctorEvaluator:
-    def __init__(self, rag):
+    def __init__(self, rag: RAGChain):
         self.rag = rag
-        self.evaluator_llm = ChatGoogleGenerativeAI(
-            model="gemini-2.5-flash",
-            google_api_key=Config.GOOGLE_API_KEY,
-            temperature=0.1
+        self._km = get_key_manager()
+        print("DoctorEvaluator: Ready (Groq + RAG)!")
+
+    # ── internal helper ────────────────────────────────────────────────────────
+    def _llm_invoke(self, prompt: str, temperature: float = 0.1) -> str:
+        """Call Groq with retry + key rotation on 429."""
+        @retry(
+            retry=retry_if_exception(_is_rate_limit),
+            wait=wait_exponential(multiplier=1, min=5, max=30),
+            stop=stop_after_attempt(4),
+            reraise=True,
         )
-        print("DoctorEvaluator: Ready (Gemini + RAG)!")
-    
-    def generate_case(self, disease: str, symptoms: str):
-        """DÙNG GEMINI TẠO CASE - NHANH + ỔN ĐỊNH"""
-        prompt = f"""
-Bạn là bác sĩ nhi khoa. Tạo một ca bệnh THỰC TẾ cho bệnh: {disease}
+        def _call():
+            try:
+                llm = self._km.build_llm(temperature=temperature)
+                return llm.invoke([prompt])
+            except Exception as exc:
+                if _is_rate_limit(exc):
+                    self._km.mark_rate_limited(self._km.current())
+                    self._km.rotate()
+                raise
+        return _call().content
 
-TRIỆU CHỨNG TỪ TÀI LIỆU:
-{symptoms}
+    # ── public methods ─────────────────────────────────────────────────────────
+    def generate_case(self, disease: str, symptoms: str) -> str:
+        """Tạo ca bệnh nhi bằng 1 LLM call, prompt ngắn gọn."""
+        prompt = (
+            f"Bạn là bác sĩ nhi khoa. Tạo 1 lời thoại của mẹ bệnh nhân (2-3 câu, "
+            f"ngôn ngữ đời thường) mô tả triệu chứng cụ thể của bệnh {disease}.\n"
+            f"Triệu chứng từ tài liệu: {symptoms[:400]}\n"
+            f"Format: 'Bé [tên] nhà chị [tên mẹ] bị [triệu chứng cụ thể]. [Thêm chi tiết].'\n"
+            f"CASE:"
+        )
+        return self._llm_invoke(prompt, temperature=0.3).strip()
 
-YÊU CẦU:
-1. Chỉ tạo lời thoại của mẹ bệnh nhân (3-4 câu)
-2. PHẢI MÔ TẢ các triệu chứng CỤ THỂ của bệnh {disease} từ tài liệu trên
-3. Dùng ngôn ngữ đời thường, tự nhiên
-4. Format: "Bé [tên] nhà chị [tên mẹ] bữa nay bị [triệu chứng cụ thể]. Chị lo lắm! [thêm chi tiết triệu chứng]."
+    def find_symptoms(self, disease: str) -> Tuple[str, list]:
+        """1 RAG query (thay cho 3 query trước đây)."""
+        answer, sources = self.rag.query(f"{disease} triệu chứng biểu hiện lâm sàng")
+        summary = answer[:600] if answer else f"Không tìm thấy thông tin triệu chứng cho {disease}"
+        return summary, sources
 
-VÍ DỤ TỐT:
-- Bệnh Viêm phổi → "Bé An bị sốt cao 39 độ, ho có đờm, thở nhanh phì phò"
-- Bệnh Suy tim → "Bé Minh thở nhanh, mệt lả, bú kém, chân tay lạnh"
-
-CASE BỆNH:
-"""
-        result = self.evaluator_llm.invoke([prompt])
-        return result.content.strip()
-
-
-    def evaluate_doctor(self, disease: str):
-        print(f"\n ĐÁNH GIÁ: {disease}")
-        print("=" * 80)
-        
-        # 1. RAG tìm TRIỆU CHỨNG
-        print("Hệ thống đang TRUY TÌM TRIỆU CHỨNG:")
-        symptoms, symptom_sources = self.find_symptoms(disease)
-        print(f"Xác định triệu chứng: {symptoms[:100]}...")
-        
-        # 2. GEMINI tạo CASE
-        print("Tiến hành tạo case...")
-        patient_case = self.generate_case(disease, symptoms)
-        print(f"Case hoàn chỉnh:\n{patient_case}")
-        
-        # 3. NHẬP TRẢ LỜI BS
-        doctor_answer = input("\n NHẬP CÂU TRẢ LỜI CỦA BÁC SĨ:\n").strip()
-        
-        # 4. RAG chi tiết + Đánh giá (giữ nguyên)
-        print("\n TRUY TÌM ĐÁP ÁN CHUẨN:")
-        standard_data, all_sources = self.get_detailed_standard_knowledge(disease)
-        evaluation = self.detailed_evaluation(doctor_answer, standard_data)
-        
-        return {
-            'case': patient_case,
-            'standard': standard_data,
-            'evaluation': evaluation,
-            'sources': all_sources
-        }
-
-    def find_symptoms(self, disease: str):
-        """RAG tìm triệu chứng bệnh - CẢI THIỆN"""
-        # Query chi tiết hơn để tìm đúng bệnh
-        queries = [
-            f"{disease} biểu hiện",
-            f"{disease} triệu chứng",
-            f"{disease} dấu hiệu"
+    def get_detailed_standard_knowledge(self, disease: str) -> Tuple[str, list]:
+        """2 RAG queries thay cho 6 query trước đây."""
+        tasks = [
+            ("CHAN_DOAN", f"{disease} lâm sàng cận lâm sàng chẩn đoán xác định phân biệt"),
+            ("DIEU_TRI",  f"{disease} điều trị thuốc"),
         ]
-        
-        all_symptoms = []
-        sources = []
-        for q in queries:
-            print(f" Query: {q}")
-            answer, src = self.rag.query(q)
-            if answer and len(answer.strip()) > 50:  # Chỉ lấy answer có nội dung
-                all_symptoms.append(answer)
-                sources.extend(src)
-        
-        # Gom triệu chứng đầy đủ hơn (không cắt quá ngắn)
-        if all_symptoms:
-            # Lấy 2 answer tốt nhất, mỗi cái 500 ký tự
-            symptoms_summary = "\n\n".join([s[:500] for s in all_symptoms[:2]])
-        else:
-            symptoms_summary = f"Không tìm thấy thông tin triệu chứng cho {disease}"
-        
-        print(f" Tìm thấy triệu chứng: {symptoms_summary[:200]}...")
-        return symptoms_summary, sources
 
-    def get_detailed_standard_knowledge(self, disease: str):
-        """RAG CHẨN ĐOÁN CHI TIẾT + ĐIỀU TRỊ"""
-        queries = {
-            'LAM_SANG': [f"{disease} lâm sàng"],
-            'CAN_LAM_SANG': [f"{disease} cận lâm sàng"],
-            'CHAN_DOAN_XAC_DINH': [f"{disease} chẩn đoán xác định"],
-            'CHAN_DOAN_PHAN_BIET': [f"{disease} chẩn đoán phân biệt"],
-            'DIEU_TRI': [f"{disease} điều trị", f"{disease} thuốc"]
-        }
-        
-        results = {}
-        all_sources = []
-        
-        for section, qlist in queries.items():
-            print(f" {section}:")
-            section_content = []
-            for q in qlist:
-                print(f" {q}")
-                answer, sources = self.rag.query(q)
-                section_content.append(answer)
-                all_sources.extend(sources)
-            results[section] = "\n".join(section_content[:2])
-        
-        # Format đẹp
-        standard_text = f"""
-            CHẨN ĐOÁN LÂM SÀNG:
-            {results['LAM_SANG']}
+        raw: Dict[str, Tuple] = {}
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            futures = {pool.submit(self.rag.query, q): key for key, q in tasks}
+            for future in as_completed(futures):
+                key = futures[future]
+                try:
+                    raw[key] = future.result()
+                except Exception as exc:
+                    print(f"[WARN] {key} query failed: {exc}")
+                    raw[key] = ("Khong tim thay thong tin", [])
 
-            CHẨN ĐOÁN CẬN LÂM SÀNG:
-            {results['CAN_LAM_SANG']}
+        all_sources: list = []
+        for key, _ in tasks:
+            all_sources.extend(raw.get(key, ("", []))[1])
 
-            CHẨN ĐOÁN XÁC ĐỊNH:
-            {results['CHAN_DOAN_XAC_DINH']}
+        def r(k): return raw.get(k, ("",))[0]
 
-            CHẨN ĐOÁN PHÂN BIỆT:
-            {results['CHAN_DOAN_PHAN_BIET']}
-
-            CÁCH ĐIỀU TRỊ:
-            {results['DIEU_TRI']}
-            """
+        standard_text = (
+            f"CHAN DOAN:\n{r('CHAN_DOAN')}\n\n"
+            f"DIEU TRI:\n{r('DIEU_TRI')}"
+        )
         return standard_text, all_sources
-    
-    def detailed_evaluation(self, doctor_answer: str, standard_data: str):
-        """ĐÁNH GIÁ CHI TIẾT + DIỄN GIẢI"""
-        prompt = f"""
-            BẠN LÀ CHUYÊN GIA Y KHOA ĐÁNH GIÁ BÁC SĨ
 
-            CÂU TRẢ LỜI BÁC SĨ:
-            {doctor_answer}
-
-            KIẾN THỨC CHUẨN:
-            {standard_data}
-
-            PHÂN TÍCH CHI TIẾT (JSON):
-            {{
-            "diem_manh": ["..."],
-            "diem_yeu": ["..."],
-            "da_co": ["..."],
-            "thieu": ["..."],
-            "dien_giai": ["Giải thích vì sao đúng/thiếu..."],
-            "diem_so": "85/100",
-            "nhan_xet_tong_quan": "..."
-            }}
-
-            JSON PURE:
-            """
-        
-        result = self.evaluator_llm.invoke([prompt])
-        return result.content
+    def detailed_evaluation(self, doctor_answer: str, standard_data: str) -> str:
+        """Đánh giá ngắn gọn — JSON 4 trường, tối đa 300 token output."""
+        std = standard_data[:1200]
+        doc = doctor_answer[:600]
+        prompt = (
+            "Chuyên gia y khoa đánh giá câu trả lời bác sĩ. Trả về JSON thuần túy, KHÔNG giải thích thêm.\n\n"
+            f"CÂU TRẢ LỜI BÁC SĨ:\n{doc}\n\n"
+            f"KIẾN THỨC CHUẨN (tóm tắt):\n{std}\n\n"
+            "JSON format (ngắn gọn, mỗi mảng tối đa 3 phần tử):\n"
+            '{"diem_so":"85/100","nhan_xet_tong_quan":"2 câu tóm tắt","diem_manh":["...","..."],"thieu":["...","..."]}\n\n'
+            "JSON:"
+        )
+        return self._llm_invoke(prompt, temperature=0)

@@ -21,18 +21,23 @@ const DiagnosisForm: React.FC<DiagnosisFormProps> = ({
   const [differentialDiagnoses, setDifferentialDiagnoses] = useState(['', '', '']);
   const [managementPlan, setManagementPlan] = useState('');
   const [showWarning, setShowWarning] = useState(false);
+  const [errors, setErrors] = useState<{ provisional?: string; management?: string }>({});
 
   const canSubmit = interactionCount >= minInteractions;
 
   const handleSubmit = () => {
+    const newErrors: { provisional?: string; management?: string } = {};
     if (!provisionalDiagnosis.trim()) {
-      alert('Vui lòng nhập chẩn đoán sơ bộ');
-      return;
+      newErrors.provisional = 'Vui lòng nhập chẩn đoán sơ bộ';
     }
     if (!managementPlan.trim()) {
-      alert('Vui lòng nhập kế hoạch xử trí');
+      newErrors.management = 'Vui lòng nhập kế hoạch xử trí';
+    }
+    if (Object.keys(newErrors).length > 0) {
+      setErrors(newErrors);
       return;
     }
+    setErrors({});
 
     if (!canSubmit && !showWarning) {
       setShowWarning(true);
@@ -137,10 +142,18 @@ const DiagnosisForm: React.FC<DiagnosisFormProps> = ({
             <input
               type="text"
               value={provisionalDiagnosis}
-              onChange={(e) => setProvisionalDiagnosis(e.target.value)}
+              onChange={(e) => {
+                setProvisionalDiagnosis(e.target.value);
+                if (errors.provisional) setErrors(prev => ({ ...prev, provisional: undefined }));
+              }}
               placeholder="VD: Viêm phổi cộng đồng"
-              className="w-full p-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-primary-500 focus:border-primary-500 transition-all"
+              className={`w-full p-3 border rounded-xl focus:ring-2 focus:ring-primary-500 focus:border-primary-500 transition-all ${
+                errors.provisional ? 'border-red-400 bg-red-50' : 'border-gray-300'
+              }`}
             />
+            {errors.provisional && (
+              <p className="text-red-500 text-sm mt-1">{errors.provisional}</p>
+            )}
           </div>
 
           {/* Differential Diagnoses */}
@@ -170,11 +183,19 @@ const DiagnosisForm: React.FC<DiagnosisFormProps> = ({
             </label>
             <textarea
               value={managementPlan}
-              onChange={(e) => setManagementPlan(e.target.value)}
+              onChange={(e) => {
+                setManagementPlan(e.target.value);
+                if (errors.management) setErrors(prev => ({ ...prev, management: undefined }));
+              }}
               placeholder="Mô tả kế hoạch điều trị, xét nghiệm cần làm, thuốc điều trị, tư vấn cho bệnh nhân/gia đình..."
               rows={5}
-              className="w-full p-3 border border-gray-300 rounded-xl focus:ring-2 focus:ring-primary-500 focus:border-primary-500 transition-all resize-none"
+              className={`w-full p-3 border rounded-xl focus:ring-2 focus:ring-primary-500 focus:border-primary-500 transition-all resize-none ${
+                errors.management ? 'border-red-400 bg-red-50' : 'border-gray-300'
+              }`}
             />
+            {errors.management && (
+              <p className="text-red-500 text-sm mt-1">{errors.management}</p>
+            )}
           </div>
 
           {/* Interaction Count Info */}

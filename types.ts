@@ -67,6 +67,9 @@ export interface RAGDiagnosisSubmission {
   submittedAt: number;
 }
 
+// Form data before the timestamp is added (what the diagnosis form emits)
+export type RAGDiagnosisData = Omit<RAGDiagnosisSubmission, 'submittedAt'>;
+
 export interface EvaluationResult {
   overallScore: number;
   maxScore: number;
@@ -97,7 +100,7 @@ export interface RAGEvaluationResult {
     file: string;
     title: string;
     section: string;
-    content: string;
+    content?: string;
   }[];
 }
 

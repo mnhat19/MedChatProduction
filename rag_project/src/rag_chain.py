@@ -1,83 +1,75 @@
-from langchain_google_genai import ChatGoogleGenerativeAI
+﻿from tenacity import retry, stop_after_attempt, wait_exponential, retry_if_exception
 from langchain_core.prompts import PromptTemplate
 from config import Config
+from key_manager import GroqKeyManager
 from hybrid_retriever import HybridRetriever
 from vector_store import VectorStoreManager
 
+# Shared key manager -- single instance reused across all RAGChain objects
+_KEY_MANAGER = None
+
+
+def get_key_manager():
+    global _KEY_MANAGER
+    if _KEY_MANAGER is None:
+        _KEY_MANAGER = GroqKeyManager(
+            keys=[Config.GROQ_API_KEY_1, Config.GROQ_API_KEY_2],
+            model=Config.GROQ_MODEL,
+        )
+    return _KEY_MANAGER
+
+
+def _is_rate_limit(exc):
+    msg = str(exc).lower()
+    return "429" in msg or "quota" in msg or "rate limit" in msg or "ratelimit" in msg
+
+
 class RAGChain:
-    def __init__(self, vector_store_manager: VectorStoreManager):
-        self.llm = ChatGoogleGenerativeAI(
-            model=Config.LLM_MODEL,
-            google_api_key=Config.GOOGLE_API_KEY,
-            temperature=0  #  0 để deterministic
-        )
-        
+    def __init__(self, vector_store_manager):
+        self._km = get_key_manager()
         self.vectorstore = vector_store_manager.vector_store
-        self.retriever = HybridRetriever(self.vectorstore)  #  FIX TYPO
-        
-        #  PROMPT MỚI: TRẢ NỘI DUNG CHUNK + TÓM TẮT
-        self.custom_prompt = PromptTemplate(
+        self.retriever = HybridRetriever(self.vectorstore)
+        self.prompt_template = PromptTemplate(
             input_variables=["context", "question"],
-            template="""
-        Bạn là bác sĩ y khoa. Dựa vào TÀI LIỆU sau:
-
-        CONTEXT:
-        {context}
-
-        CÂU HỎI: {question}
-
-        TRẢ LỜI:
-        1. TRÍCH DẪN ĐÚNG nội dung từ CONTEXT (giữ nguyên văn bản)
-        2. Tóm tắt ngắn gọn nếu cần
-        3. Luôn ưu tiên thông tin từ chunk chính xác nhất
-
-        NỘI DUNG TÀI LIỆU:
-        """
+            template="Tài liệu y khoa:\n{context}\n\nCâu hỏi: {question}\n\nTrả lời ngắn gọn, chọn lọc thông tin quan trọng nhất từ tài liệu (tối đa 200 từ):"
         )
-    
-    def query(self, question: str):
-        """HYBRID RETRIEVAL + FULL CHUNK CONTENT"""
-        
-        #  BƯỚC 1: HYBRID SEARCH - PRIORITY KEYWORD
-        sources = self.retriever.hybrid_search(question, k=4)
-        
-        #  BƯỚC 2: RE-RANK theo keyword match
-        ranked_sources = self.rerank_sources(sources, question)
-        
-        #  BƯỚC 3: Tạo context FULL CONTENT
-        context = self.build_context(ranked_sources)
-        
-        #  BƯỚC 4: Generate với prompt rõ ràng
-        formatted_prompt = self.custom_prompt.format(
-            context=context, 
-            question=question
+
+    def query(self, question):
+        sources = self.retriever.hybrid_search(question, k=3)
+        ranked = self.rerank_sources(sources, question)
+        context = self.build_context(ranked)
+        prompt = self.prompt_template.format(context=context, question=question)
+
+        @retry(
+            retry=retry_if_exception(_is_rate_limit),
+            wait=wait_exponential(multiplier=1, min=5, max=30),
+            stop=stop_after_attempt(4),
+            reraise=True,
         )
-        
-        result = self.llm.invoke([formatted_prompt])
-        return result.content, ranked_sources
-    
+        def _invoke():
+            try:
+                llm = self._km.build_llm(temperature=0)
+                return llm.invoke([prompt])
+            except Exception as exc:
+                if _is_rate_limit(exc):
+                    self._km.mark_rate_limited(self._km.current())
+                    self._km.rotate()
+                raise
+
+        result = _invoke()
+        return result.content, ranked
+
     def rerank_sources(self, sources, question):
-        """RE-RANK: Keyword match > Semantic"""
         keywords = question.lower().split()
-        
-        def score_doc(doc):
-            content = doc.page_content.lower()
-            title = doc.metadata.get('chunk_title', '').lower()
-            score = sum(1 for kw in keywords if kw in content or kw in title)
-            return score
-        
-        return sorted(sources, key=score_doc, reverse=True)
-    
+        def score(doc):
+            text = doc.page_content.lower() + doc.metadata.get("chunk_title", "").lower()
+            return sum(1 for kw in keywords if kw in text)
+        return sorted(sources, key=score, reverse=True)
+
     def build_context(self, sources):
-        """FULL CHUNK CONTENT + METADATA"""
-        context_parts = []
+        parts = []
         for i, doc in enumerate(sources[:3]):
-            file = doc.metadata.get('source_file', 'N/A')
-            chunk_title = doc.metadata.get('chunk_title', 'N/A')
-            section_title = doc.metadata.get('section_title', 'N/A')
-            
-            context_parts.append(
-                f"[{i+1}] {file} | {chunk_title} | {section_title}\n"
-                f"NỘI DUNG:\n{doc.page_content}\n{'='*80}"
-            )
-        return "\n\n".join(context_parts)
+            meta = f"[{i+1}] {doc.metadata.get('source_file','?')} | {doc.metadata.get('chunk_title','?')}"
+            content = doc.page_content[:600]
+            parts.append(f"{meta}\n{content}")
+        return "\n\n".join(parts)

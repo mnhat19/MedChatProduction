@@ -46,7 +46,7 @@ const FeedbackPanel: React.FC<FeedbackPanelProps> = ({
   evaluation,
   ragEvaluation,
   diagnosis,
-  ragDiagnosis,
+  ragDiagnosis: _ragDiagnosis,
   patientInfo,
   isLoading = false,
   onBackToHome,

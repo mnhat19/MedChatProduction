@@ -23,6 +23,18 @@ build/
 .env
 .env.local
 .env.*.local
+rag_project/.env
+rag_project/.env.local
+
+# SQLite databases (generated at runtime)
+rag_project/sessions.db
+rag_project/disease_cache.db
+
+# FAISS cache (rebuild on deploy)
+rag_project/faiss_cache/
+
+# Training / fine-tune data (not needed for API)
+rag_project/pediatric_finetune_15k_vietnamese.jsonl
 
 # Editor directories and files
 .vscode/*

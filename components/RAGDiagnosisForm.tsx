@@ -1,14 +1,6 @@
 import React, { useState } from 'react';
+import { RAGDiagnosisData } from '../types';
 import { XMarkIcon, DocumentTextIcon, CheckIcon } from './Icons';
-
-export interface RAGDiagnosisData {
-  clinical: string;              // Lâm sàng
-  paraclinical: string;          // Cận lâm sàng
-  definitiveDiagnosis: string;   // Chẩn đoán xác định
-  differentialDiagnosis: string; // Chẩn đoán phân biệt
-  treatment: string;             // Cách điều trị
-  medication: string;            // Thuốc
-}
 
 interface RAGDiagnosisFormProps {
   isOpen: boolean;
@@ -31,17 +23,17 @@ const RAGDiagnosisForm: React.FC<RAGDiagnosisFormProps> = ({
     treatment: '',
     medication: '',
   });
+  const [formError, setFormError] = useState('');
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    
-    // Validate at least some fields are filled
+
     const hasContent = Object.values(formData).some(v => v.trim().length > 0);
     if (!hasContent) {
-      alert('Vui lòng nhập ít nhất một trường thông tin');
+      setFormError('Vui lòng nhập ít nhất một trường thông tin');
       return;
     }
-
+    setFormError('');
     onSubmit(formData);
   };
 
@@ -207,25 +199,30 @@ const RAGDiagnosisForm: React.FC<RAGDiagnosisFormProps> = ({
           >
             Hủy
           </button>
-          
-          <button
-            type="submit"
-            onClick={handleSubmit}
-            disabled={isEvaluating}
-            className="px-6 py-2 bg-primary-600 text-white rounded-lg hover:bg-primary-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
-          >
-            {isEvaluating ? (
-              <>
-                <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
-                Đang đánh giá...
-              </>
-            ) : (
-              <>
-                <CheckIcon className="w-5 h-5" />
-                Nộp Bài
-              </>
+
+          <div className="flex items-center gap-3">
+            {formError && (
+              <p className="text-red-500 text-sm">{formError}</p>
             )}
-          </button>
+            <button
+              type="submit"
+              onClick={handleSubmit}
+              disabled={isEvaluating}
+              className="px-6 py-2 bg-primary-600 text-white rounded-lg hover:bg-primary-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
+            >
+              {isEvaluating ? (
+                <>
+                  <div className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
+                  Đang đánh giá...
+                </>
+              ) : (
+                <>
+                  <CheckIcon className="w-5 h-5" />
+                  Nộp Bài
+                </>
+              )}
+            </button>
+          </div>
         </div>
       </div>
     </div>

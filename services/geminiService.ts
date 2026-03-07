@@ -1,5 +1,5 @@
 import { GoogleGenerativeAI } from "@google/generative-ai";
-import { SYSTEM_INSTRUCTION, VIRTUAL_PATIENT_INSTRUCTION, EVALUATOR_INSTRUCTION, CLINICAL_SYSTEMS, DIFFICULTY_LEVELS, COMMON_DISEASES, RAG_CASE_GENERATION_PROMPT } from "../constants";
+import { SYSTEM_INSTRUCTION, VIRTUAL_PATIENT_INSTRUCTION, EVALUATOR_INSTRUCTION, CLINICAL_SYSTEMS, DIFFICULTY_LEVELS, COMMON_DISEASES } from "../constants";
 import { Message, CaseConfig, PatientInfo, TrainingSession, DiagnosisSubmission, EvaluationResult, ClinicalSystem, DifficultyLevel, AgeGroup } from "../types";
 
 const MODEL_NAME = 'gemini-2.5-flash';
@@ -120,7 +120,7 @@ const generateDiseaseBasedCase = async (client: GoogleGenerativeAI, config: Case
   let age: number;
   let ageUnit: 'days' | 'months' | 'years';
   
-  if (diseaseCategory === 'pediatrics' || diseaseCategory === 'Lý thuyết nhi khoa') {
+  if (diseaseCategory === 'pediatrics') {
     // Pediatric cases - varied ages
     const ageChoice = Math.random();
     if (ageChoice < 0.2) {

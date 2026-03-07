@@ -4,7 +4,7 @@ from embeddings import EmbeddingsManager
 from typing import List
 from pathlib import Path
 import json
-from pymongo import MongoClient
+# pymongo is only needed for save_documents(); imported lazily below
 
 from data_loader import DataLoader
 
@@ -72,8 +72,8 @@ class VectorStoreManager:
         return self.vector_store.as_retriever(search_kwargs={"k": k})  
     
     def save_documents(self, docs):
-
-        output_dir = Path(r"D:\Storage\rag_project\store")
+        from pymongo import MongoClient  # optional dependency
+        output_dir = Path(__file__).parent.parent / "store"
         output_dir.mkdir(parents=True, exist_ok=True)
 
         records = []

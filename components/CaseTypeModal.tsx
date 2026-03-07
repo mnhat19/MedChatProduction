@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { CaseConfig, CaseType, ClinicalSystem, DifficultyLevel, AgeGroup, DiseaseCategory } from '../types';
+import { CaseConfig, AgeGroup } from '../types';
 import { CLINICAL_SYSTEMS, DIFFICULTY_LEVELS, AGE_GROUPS, DISEASE_CATEGORIES, COMMON_DISEASES } from '../constants';
 import { XMarkIcon, ShuffleIcon, SettingsIcon, PlayIcon, ChevronRightIcon, BookOpenIcon } from './Icons';
 import { ragService, Disease, CategoryCount } from '../services/ragService';

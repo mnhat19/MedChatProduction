@@ -1,0 +1,31 @@
+# Render.com deployment config
+# Free tier: 750 h/month — enough for 24/7 with UptimeRobot keep-alive
+# RAM: 512 MB (tight for PhoBERT — recommend HF Spaces if RAM issues occur)
+
+services:
+  - type: web
+    name: medchat-backend
+    env: python
+    region: singapore   # closest to Vietnam
+    plan: free
+
+    # Build: install deps AND pre-build FAISS index
+    buildCommand: |
+      pip install -r requirements_api.txt
+      python src/build_faiss.py
+
+    startCommand: python api_server_fastapi.py
+
+    healthCheckPath: /api/health
+
+    envVars:
+      - key: GROQ_API_KEY_1
+        sync: false          # set manually in Render dashboard
+      - key: GROQ_API_KEY_2
+        sync: false
+      - key: GROQ_MODEL
+        value: llama-3.3-70b-versatile
+      - key: ALLOWED_ORIGINS
+        sync: false          # set to your Vercel URL, e.g. https://medchat.vercel.app
+      - key: PORT
+        value: "8001"
