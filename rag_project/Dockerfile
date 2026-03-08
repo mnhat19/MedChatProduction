@@ -23,9 +23,9 @@ COPY . .
 
 # Pin HuggingFace cache inside /app so the sentence-transformer model is
 # downloaded once during `docker build` and baked into the image layer.
-# This eliminates cold-start latency on HuggingFace Spaces restarts.
 ENV HF_HOME=/app/.hf_cache
 ENV TRANSFORMERS_CACHE=/app/.hf_cache/transformers
+ENV SENTENCE_TRANSFORMERS_HOME=/app/.hf_cache/sentence_transformers
 
 # Set ownership (includes .hf_cache written by the build step below)
 RUN chown -R appuser:appuser /app
@@ -34,6 +34,13 @@ USER appuser
 
 # Pre-build FAISS index + download the embedding model into /app/.hf_cache
 RUN python src/build_faiss.py
+
+# ── Offline mode ────────────────────────────────────────────────────────────
+# Model is now cached in the image. Tell all HF libraries to NEVER call the
+# network at runtime — prevents "Could not resolve host: huggingface.co" errors.
+ENV TRANSFORMERS_OFFLINE=1
+ENV HF_DATASETS_OFFLINE=1
+ENV HF_HUB_OFFLINE=1
 
 # Environment defaults (override via HF Space secrets)
 ENV GROQ_API_KEY_1=""

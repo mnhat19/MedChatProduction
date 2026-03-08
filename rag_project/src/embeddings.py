@@ -6,8 +6,13 @@ from numpy.linalg import norm
 class EmbeddingsManager:
     # Khởi tạo model embedding từ cofig ngay khi gọi class
     def __init__(self):
+        import os
+        # Use cached model; never call the network (model is baked into Docker image)
+        local_only = os.getenv("TRANSFORMERS_OFFLINE", "0") == "1" or \
+                     os.getenv("HF_HUB_OFFLINE", "0") == "1"
         self.embeddings = HuggingFaceEmbeddings(
-            model_name=Config.EMBEDDING_MODEL
+            model_name=Config.EMBEDDING_MODEL,
+            model_kwargs={"local_files_only": local_only},
         )
     
     def get_embeddings(self):
