@@ -53,18 +53,24 @@ class GeminiKeyManager {
   }
 }
 
-const _km = new GeminiKeyManager();
+// Lazily initialized — avoids crash at module load when env vars are missing on first deploy
+let _km: GeminiKeyManager | null = null;
+const getKm = (): GeminiKeyManager => {
+  if (!_km) _km = new GeminiKeyManager();
+  return _km;
+};
 
 /** Retry up to 3 times, rotating Gemini key on each 429/quota error. */
 async function withRetry<T>(fn: () => Promise<T>): Promise<T> {
+  const km = getKm();
   for (let i = 0; i < 3; i++) {
-    const key = _km.currentKey();
+    const key = km.currentKey();
     try {
       return await fn();
     } catch (err: any) {
       if (_isRateLimit(err) && i < 2) {
-        _km.markRateLimited(key);
-        _km.rotate();
+        km.markRateLimited(key);
+        km.rotate();
         continue;
       }
       throw err;
@@ -80,10 +86,8 @@ export const sendMessageStream = async (
   patientInfo?: PatientInfo | null
 ) => {
   try {
-    await withRetry(async () => {
     console.log('sendMessageStream called with:', { historyLength: history.length, message, hasPatientInfo: !!patientInfo });
-    const client = _km.currentClient();
-    console.log('Client obtained');
+    const km = getKm();
     
     // Build system instruction based on context
     let systemInstruction = SYSTEM_INSTRUCTION;
@@ -102,47 +106,33 @@ Thông tin bệnh nhân:
       systemInstruction = VIRTUAL_PATIENT_INSTRUCTION.replace('{CASE_INFO}', caseInfo);
     }
 
-    const model = client.getGenerativeModel({ 
-      model: MODEL_NAME,
-      systemInstruction 
+    // Retry only the initial stream setup (not the for-await loop)
+    // to avoid calling onChunk twice if a 429 arrives mid-stream
+    const result = await withRetry(async () => {
+      const client = km.currentClient();
+      const model = client.getGenerativeModel({ model: MODEL_NAME, systemInstruction });
+
+      let chatHistory = history
+        .filter(m => !m.isError && m.content.trim() !== '')
+        .map(m => ({
+          role: m.role === 'user' ? 'user' : 'model' as const,
+          parts: [{ text: m.content }]
+        }));
+
+      if (chatHistory.length > 0 && chatHistory[0].role === 'model') {
+        chatHistory = chatHistory.slice(1);
+      }
+
+      const chat = model.startChat({ history: chatHistory });
+      return chat.sendMessageStream(message);
     });
-
-    // Convert history to Gemini format
-    // Gemini requires history to start with 'user' role, so we need to handle this
-    let chatHistory = history
-      .filter(m => !m.isError && m.content.trim() !== '')
-      .map(m => ({
-        role: m.role === 'user' ? 'user' : 'model' as const,
-        parts: [{ text: m.content }]
-      }));
-    
-    // If history starts with 'model', we need to prepend a dummy user message
-    // or skip the first model message for chat context
-    if (chatHistory.length > 0 && chatHistory[0].role === 'model') {
-      // Skip the opening message from model for chat history, it's already in context
-      chatHistory = chatHistory.slice(1);
-    }
-    
-    console.log('Chat history:', chatHistory);
-
-    const chat = model.startChat({ history: chatHistory });
-    console.log('Chat started, sending message...');
-    
-    const result = await chat.sendMessageStream(message);
-    console.log('Stream result obtained');
 
     for await (const chunk of result.stream) {
       const text = chunk.text();
-      console.log('Received chunk:', text);
-      if (text) {
-        onChunk(text);
-      }
+      if (text) onChunk(text);
     }
-    console.log('Stream completed');
-    }); // end withRetry
   } catch (error: any) {
-    console.error("Error in stream:", error);
-    console.error("Error details:", error?.message, error?.status, error?.statusText);
+    console.error("Error in stream:", error?.message, error?.status);
     throw error;
   }
 };
@@ -218,7 +208,7 @@ Hãy tạo một ca bệnh thực tế dựa trên bệnh lý trên. Trả về 
 
   try {
     const result = await withRetry(async () => {
-      const model = _km.currentClient().getGenerativeModel({ model: MODEL_NAME });
+      const model = getKm().currentClient().getGenerativeModel({ model: MODEL_NAME });
       console.log('Generating disease-based case with Gemini...', diseaseName);
       return model.generateContent(prompt);
     });
@@ -356,7 +346,7 @@ Trả về JSON với format sau (chỉ trả về JSON, không có text khác):
 
   try {
     const result = await withRetry(async () => {
-      const model = _km.currentClient().getGenerativeModel({ model: MODEL_NAME });
+      const model = getKm().currentClient().getGenerativeModel({ model: MODEL_NAME });
       console.log('Generating case with Gemini...');
       return model.generateContent(prompt);
     });
@@ -457,7 +447,7 @@ Hãy đánh giá và trả về JSON với format sau (chỉ trả về JSON):
 
   try {
     const result = await withRetry(async () => {
-      const model = _km.currentClient().getGenerativeModel({ model: MODEL_NAME });
+      const model = getKm().currentClient().getGenerativeModel({ model: MODEL_NAME });
       console.log('Evaluating session with Gemini...');
       return model.generateContent(prompt);
     });

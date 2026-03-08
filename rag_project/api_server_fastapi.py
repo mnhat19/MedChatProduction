@@ -45,10 +45,10 @@ app = FastAPI(
     redoc_url="/redoc"
 )
 
-# Configure CORS — restrict to known frontend origins via ALLOWED_ORIGINS env var
-_allowed_origins_env = os.getenv(
-    "ALLOWED_ORIGINS", "http://localhost:3000,http://localhost:5173"
-)
+# Configure CORS — restrict to known frontend origins via ALLOWED_ORIGINS env var.
+# Default "*" so HuggingFace Spaces / fresh deploys work without manual config.
+# For production hardening, set ALLOWED_ORIGINS=https://your-app.vercel.app
+_allowed_origins_env = os.getenv("ALLOWED_ORIGINS", "*")
 ALLOWED_ORIGINS = [o.strip() for o in _allowed_origins_env.split(",") if o.strip()]
 
 app.add_middleware(
