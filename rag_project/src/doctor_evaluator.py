@@ -90,15 +90,26 @@ class DoctorEvaluator:
         return standard_text, all_sources
 
     def detailed_evaluation(self, doctor_answer: str, standard_data: str) -> str:
-        """Đánh giá ngắn gọn — JSON 4 trường, tối đa 300 token output."""
-        std = standard_data[:1200]
-        doc = doctor_answer[:600]
+        """Đánh giá có đối chiếu RAG — 7 trường JSON, ~600 token output."""
+        # Keep standard data longer so the LLM can do real comparison
+        std = standard_data[:2800]
+        doc = doctor_answer[:1000]
         prompt = (
-            "Chuyên gia y khoa đánh giá câu trả lời bác sĩ. Trả về JSON thuần túy, KHÔNG giải thích thêm.\n\n"
-            f"CÂU TRẢ LỜI BÁC SĨ:\n{doc}\n\n"
-            f"KIẾN THỨC CHUẨN (tóm tắt):\n{std}\n\n"
-            "JSON format (ngắn gọn, mỗi mảng tối đa 3 phần tử):\n"
-            '{"diem_so":"85/100","nhan_xet_tong_quan":"2 câu tóm tắt","diem_manh":["...","..."],"thieu":["...","..."]}\n\n'
+            "Bạn là chuyên gia y khoa đánh giá sinh viên. "
+            "Đối chiếu câu trả lời với KIẾN THỨC CHUẨN bên dưới và trả về JSON thuần túy, KHÔNG giải thích ngoài JSON.\n\n"
+            f"CÂU TRẢ LỜI SINH VIÊN:\n{doc}\n\n"
+            f"KIẾN THỨC CHUẨN TỪ CƠ SỞ DỮ LIỆU Y KHOA:\n{std}\n\n"
+            "Trả về JSON theo đúng schema này (mỗi mảng tối đa 4 phần tử ngắn gọn, dùng tiếng Việt):\n"
+            "{\n"
+            '  "diem_so": "X/100",\n'
+            '  "nhan_xet_tong_quan": "2-3 câu nhận xét tổng quan, đối chiếu trực tiếp với tài liệu chuẩn",\n'
+            '  "diem_manh": ["điểm sinh viên đúng so với tài liệu chuẩn (trích dẫn ngắn)"],\n'
+            '  "diem_yeu": ["điểm sai hoặc thiếu so với tài liệu chuẩn (chỉ rõ cụ thể)"],\n'
+            '  "da_co": ["thông tin sinh viên đề cập khớp với kiến thức chuẩn"],\n'
+            '  "thieu": ["yếu tố quan trọng trong tài liệu mà sinh viên bỏ qua hoàn toàn"],\n'
+            '  "dien_giai": "phân tích 4-5 câu: so sánh từng mục chẩn đoán/điều trị với kiến thức chuẩn, '\
+            'nêu rõ đúng/sai/thiếu, có dẫn chứng từ tài liệu"\n'
+            "}\n\n"
             "JSON:"
         )
         return self._llm_invoke(prompt, temperature=0)

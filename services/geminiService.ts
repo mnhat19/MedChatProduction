@@ -620,8 +620,11 @@ export const evaluateSession = async (
   session: TrainingSession,
   diagnosis: DiagnosisSubmission
 ): Promise<EvaluationResult> => {
-  const conversationText = session.messages
-    .map(m => `${m.role === 'user' ? 'Sinh viên' : 'Bệnh nhân'}: ${m.content}`)
+  // Cap conversation to last 50 exchanges to keep tokens bounded
+  const allMessages = session.messages.filter(m => !m.isError && m.content.trim());
+  const cappedMessages = allMessages.slice(-50);
+  const conversationText = cappedMessages
+    .map(m => `${m.role === 'user' ? 'Sinh viên' : 'Bệnh nhân'}: ${m.content.slice(0, 400)}`)
     .join('\n');
 
   const patientInfo = session.patientInfo;
@@ -637,7 +640,7 @@ export const evaluateSession = async (
 - Hệ cơ quan: ${systemLabel}
 - Mức độ phức tạp: ${difficultyLabel}
 
-=== CUỘC HỘI THOẠI ===
+=== CUỘC HỏĨ ĐÁP (${cappedMessages.length} lượt) ===
 ${conversationText}
 
 === CHẨN ĐOÁN CỦA SINH VIÊN ===
@@ -645,19 +648,19 @@ ${conversationText}
 - Chẩn đoán phân biệt: ${diagnosis.differentialDiagnoses.join(', ') || 'Không có'}
 - Kế hoạch xử trí: ${diagnosis.managementPlan}
 
-Hãy đánh giá và trả về JSON với format sau (chỉ trả về JSON):
+Hãy đánh giá theo đúng tiêu chí trên và trả về JSON (chỉ JSON, không có text khác):
 {
-  "overallScore": <số từ 0-100>,
+  "overallScore": <số tổng 0-100>,
   "subScores": {
-    "historyTaking": <số từ 0-25>,
-    "physicalExamination": <số từ 0-25>,
-    "diagnosis": <số từ 0-25>,
-    "managementPlan": <số từ 0-25>
+    "historyTaking": <0-30>,
+    "physicalExamination": <0-20>,
+    "diagnosis": <0-30>,
+    "managementPlan": <0-20>
   },
-  "strengths": ["<điểm mạnh 1>", "<điểm mạnh 2>"],
-  "weaknesses": ["<điểm yếu 1>", "<điểm yếu 2>"],
-  "suggestions": ["<gợi ý cải thiện 1>", "<gợi ý cải thiện 2>"],
-  "detailedFeedback": "<nhận xét chi tiết 3-5 câu>"
+  "strengths": ["<điểm mạnh có dẫn chứng cụ thể từ hội thoại>", "...", "..."],
+  "weaknesses": ["<điểm yếu có dẫn chứng cụ thể từ hội thoại>", "...", "..."],
+  "suggestions": ["<gợi ý cụ thể nêu câu hỏi nên hỏi>", "..."],
+  "detailedFeedback": "<5-7 câu: mỗi tiêu chí 1-2 câu nhận xét, trích dẫn câu hỏi/hôi đáp cụ thỉ>"
 }`;
 
   try {

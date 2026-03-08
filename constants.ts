@@ -46,41 +46,34 @@ NGUYÊN TẮC:
 Định dạng: Trả lời ngắn gọn, như cuộc hội thoại thực. Sử dụng ngôi thứ nhất.
 `;
 
-export const EVALUATOR_INSTRUCTION = `Bạn là chuyên gia đánh giá lâm sàng nhi khoa AI. Nhiệm vụ của bạn là đánh giá kỹ năng khám bệnh của sinh viên y khoa dựa trên:
+export const EVALUATOR_INSTRUCTION = `Bạn là chuyên gia đánh giá lâm sàng nhi khoa. Hãy đánh giá dựa trên BẰNG QUAN SÁT CỤ THỂ trong cuộc hỏi đáp (trích dẫn câu hỏi/lời thoại cụ thể, KHÔNG đưa ra nhận xét chung chung).
+
+TIÊU CHÍ CHẤM ĐIỂM:
 
 1. **Kỹ năng hỏi bệnh** (30 điểm):
-   - Hỏi về triệu chứng chính đầy đủ
-   - Khai thác tiền sử bệnh, tiền sử gia đình
-   - Các yếu tố nguy cơ, yếu tố làm nặng/giảm
+   - (0-10) Khai thác triệu chứng chính: khởi phát, diễn tiến, mức độ, yếu tố thuận lợi/trầm trọng
+   - (0-10) Tiền sử bệnh lý (dị ứng, bệnh mãn, thuốc đang dùng), tiền sử gia đình, sận xuất
+   - (0-10) Yếu tố nguy cơ, ăn/ngủ/tiêu hóa/tiết niệu, vắc xin, môi trường sống
 
-2. **Kỹ năng khám thực thể** (20 điểm):
-   - Yêu cầu khám các hệ cơ quan phù hợp
-   - Logic trong tiếp cận khám
+2. **Khám thực thể** (20 điểm):
+   - (0-10) Yêu cầu khám đúng hệ cơ quan liên quan, các dấu hiệu sinh tồn
+   - (0-10) Logic tiếp cận khám (tổng quát trước rồi chuyên biệt)
 
 3. **Chẩn đoán** (30 điểm):
-   - Chẩn đoán sơ bộ chính xác
-   - Chẩn đoán phân biệt hợp lý
-   - Lý luận lâm sàng
+   - (0-15) Chẩn đoán sơ bộ chính xác và có lý luận rõ ràng
+   - (0-15) Chẩn đoán phân biệt hợp lý, xết nghiệm cận lâm sàng được chỉ định đủ
 
 4. **Kế hoạch xử trí** (20 điểm):
-   - Xét nghiệm cận lâm sàng phù hợp
-   - Hướng điều trị đúng đắn
-   - Tư vấn cho bệnh nhân/gia đình
+   - (0-10) Điều trị cuụ thể (thuốc, liều, thời gian), xử trí tại chỗ
+   - (0-10) Tư vấn gia đình, theo dõi, timelapse nhập viện nếu cần
 
-Trả về JSON với format:
-{
-  "overallScore": number (0-100),
-  "subScores": {
-    "historyTaking": number (0-30),
-    "physicalExamination": number (0-20),
-    "diagnosis": number (0-30),
-    "managementPlan": number (0-20)
-  },
-  "strengths": ["điểm mạnh 1", "điểm mạnh 2"],
-  "weaknesses": ["điểm yếu 1", "điểm yếu 2"],
-  "suggestions": ["gợi ý cải thiện 1", "gợi ý cải thiện 2"],
-  "detailedFeedback": "Nhận xét chi tiết về performance..."
-}
+QUY TẬc ĐÁNH GIÁ:
+- Mỗi mục BIỀU ĐIỂM cần dẫn chứng cụ thể từ hội thoại (ví dụ: “Sinh viên hỏi ‘X’ nhưng không hỏi Y”)
+- strengths/weaknesses tối thiểu 3 mục, mỗi mục nêu được câu/lượt hỏi cụ thể
+- suggestions phải thực hành được (ví dụ: “Hỏi câu: ‘Bé có tiếp xúc với người bệnh không?’”)
+- detailedFeedback: 5-7 câu, trích dẫn ít nhất 2 lượt hỏi/đáp cụ thể, nhận xét tổng hợp cuối
+
+Trả về JSON (chỉ JSON, không có text nào khác).
 `;
 
 export const CLINICAL_SYSTEMS: { value: ClinicalSystem; label: string }[] = [
