@@ -48,11 +48,10 @@ class GeminiKeyManager {
     ].filter(Boolean) as string[];
     this.keys = [...new Set(candidates)];
     if (this.keys.length === 0) {
-      const err = new Error('Chưa cấu hình VITE_GEMINI_API_KEY. Vui lòng liên hệ quản trị viên.');
-      (err as any).isConfigError = true;
-      throw err;
+      console.warn('[GeminiKeyManager] No Gemini API keys configured — will use Groq fallback.');
+    } else {
+      console.log(`[GeminiKeyManager] ${this.keys.length} key(s) loaded`);
     }
-    console.log(`[GeminiKeyManager] ${this.keys.length} key(s) loaded`);
   }
 
   getClient(key: string): GoogleGenerativeAI {
@@ -87,7 +86,7 @@ class GeminiKeyManager {
   }
 }
 
-// Lazily initialized — avoids crash at module load when env vars are missing on first deploy
+// Lazily initialized — safe even when no Gemini keys are configured
 let _km: GeminiKeyManager | null = null;
 const getKm = (): GeminiKeyManager => {
   if (!_km) _km = new GeminiKeyManager();
@@ -100,10 +99,12 @@ const _sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
  * Try all (key, model) combinations in cascade order.
  * fn receives the GoogleGenerativeAI client and the active model name.
  * On 429 the combo is cooled down and the next one is tried immediately.
+ * If no Gemini keys are configured, skips straight to the "all exhausted" path
+ * which triggers the Groq fallback in each call site.
  */
 async function withRetry<T>(fn: (client: GoogleGenerativeAI, model: string) => Promise<T>): Promise<T> {
   const km = getKm();
-  const combos = km.getCombos();
+  const combos = km.getCombos(); // empty array when no keys configured
   const deprecatedModels = new Set<string>(); // 404 models to skip for this request
   let lastErr: any;
 
@@ -294,7 +295,7 @@ Thông tin bệnh nhân:
     }
   } catch (error: any) {
     // ── Groq streaming fallback ──────────────────────────────────────
-    if (error?.isRateLimit && getGroqKm()) {
+    if ((error?.isRateLimit || error?.isConfigError) && getGroqKm()) {
       console.log('[Groq] Gemini exhausted — falling back to Groq for stream...');
       const validHist = history.filter(m => !m.isError && m.content.trim() !== '');
       const groqMsgs: GroqMsg[] = [
@@ -414,7 +415,7 @@ Hãy tạo một ca bệnh thực tế dựa trên bệnh lý trên. Trả về 
   } catch (error) {
     console.error('Disease-based case generation error:', error);
     // Try Groq before final hardcoded fallback
-    if ((error as any)?.isRateLimit && getGroqKm()) {
+    if (((error as any)?.isRateLimit || (error as any)?.isConfigError) && getGroqKm()) {
       try {
         const groqText = await groqComplete([{ role: 'user', content: prompt }]);
         const jMatch = groqText.match(/\{[\s\S]*\}/);
@@ -573,7 +574,7 @@ Trả về JSON với format sau (chỉ trả về JSON, không có text khác):
   } catch (error) {
     console.error('Case generation error:', error);
     // Try Groq before final hardcoded fallback
-    if ((error as any)?.isRateLimit && getGroqKm()) {
+    if (((error as any)?.isRateLimit || (error as any)?.isConfigError) && getGroqKm()) {
       try {
         const groqText = await groqComplete([{ role: 'user', content: prompt }]);
         const jMatch = groqText.match(/\{[\s\S]*\}/);
@@ -693,7 +694,7 @@ Hãy đánh giá và trả về JSON với format sau (chỉ trả về JSON):
   } catch (error) {
     console.error('Evaluation error:', error);
     // Try Groq before hardcoded fallback
-    if ((error as any)?.isRateLimit && getGroqKm()) {
+    if (((error as any)?.isRateLimit || (error as any)?.isConfigError) && getGroqKm()) {
       try {
         const groqText = await groqComplete([{ role: 'user', content: prompt }]);
         const jMatch = groqText.match(/\{[\s\S]*\}/);
