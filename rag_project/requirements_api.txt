@@ -5,7 +5,7 @@ pydantic==2.10.6
 
 # LangChain stack — ALL pinned to avoid pip backtracking during Docker build
 langchain==0.3.7
-langchain-core==0.3.28
+langchain-core==0.3.29
 langchain-community==0.3.7
 langchain-groq==0.2.3
 langchain-huggingface==0.1.2
