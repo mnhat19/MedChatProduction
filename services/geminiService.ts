@@ -2,7 +2,7 @@ import { GoogleGenerativeAI } from "@google/generative-ai";
 import { SYSTEM_INSTRUCTION, VIRTUAL_PATIENT_INSTRUCTION, EVALUATOR_INSTRUCTION, CLINICAL_SYSTEMS, DIFFICULTY_LEVELS, COMMON_DISEASES } from "../constants";
 import { Message, CaseConfig, PatientInfo, TrainingSession, DiagnosisSubmission, EvaluationResult, ClinicalSystem, DifficultyLevel, AgeGroup } from "../types";
 
-const MODEL_NAME = 'gemini-2.5-flash';
+const MODEL_NAME = 'gemini-2.0-flash';
 
 // ── Gemini multi-key round-robin rotation ────────────────────────────────────
 const _isRateLimit = (err: any): boolean => {
@@ -23,7 +23,11 @@ class GeminiKeyManager {
       env.VITE_GEMINI_API_KEY, // legacy / single-key fallback
     ].filter(Boolean) as string[];
     this.keys = [...new Set(candidates)];
-    if (this.keys.length === 0) throw new Error('No VITE_GEMINI_API_KEY* env vars configured');
+    if (this.keys.length === 0) {
+      const err = new Error('Chưa cấu hình VITE_GEMINI_API_KEY. Vui lòng liên hệ quản trị viên.');
+      (err as any).isConfigError = true;
+      throw err;
+    }
     console.log(`[GeminiKeyManager] ${this.keys.length} key(s) loaded`);
   }
 
@@ -60,7 +64,9 @@ const getKm = (): GeminiKeyManager => {
   return _km;
 };
 
-/** Retry up to 3 times, rotating Gemini key on each 429/quota error. */
+const _sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
+
+/** Retry up to 3 times, rotating Gemini key + brief back-off on each 429/quota error. */
 async function withRetry<T>(fn: () => Promise<T>): Promise<T> {
   const km = getKm();
   for (let i = 0; i < 3; i++) {
@@ -71,7 +77,14 @@ async function withRetry<T>(fn: () => Promise<T>): Promise<T> {
       if (_isRateLimit(err) && i < 2) {
         km.markRateLimited(key);
         km.rotate();
+        await _sleep(2000 * (i + 1)); // 2s, then 4s back-off
         continue;
+      }
+      // Wrap rate-limit errors with a friendlier message
+      if (_isRateLimit(err)) {
+        const friendly = new Error('Hệ thống đang bận, vui lòng thử lại sau vài giây. (Rate limit)');
+        (friendly as any).isRateLimit = true;
+        throw friendly;
       }
       throw err;
     }

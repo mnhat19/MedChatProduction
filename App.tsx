@@ -299,12 +299,17 @@ const App: React.FC = () => {
         },
         currentSession.patientInfo // Pass patient context
       );
-    } catch (error) {
+    } catch (error: any) {
+      const errMsg = (error as any)?.isRateLimit
+        ? "Hệ thống đang bận (rate limit). Vui lòng đợi vài giây rồi thử lại."
+        : (error as any)?.isConfigError
+        ? "Lỗi cấu hình: chưa thiết lập API key. Vui lòng liên hệ quản trị viên."
+        : "Xin lỗi, có lỗi xảy ra. Vui lòng thử lại.";
       setSessions(prev => prev.map(s => {
         if (s.id === currentSessionId) {
           const updatedMessages = s.messages.map(m => {
             if (m.id === botMsgId) {
-              return { ...m, isError: true, content: m.content || "Xin lỗi, có lỗi xảy ra." };
+              return { ...m, isError: true, content: m.content || errMsg };
             }
             return m;
           });

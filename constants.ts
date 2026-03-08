@@ -1,6 +1,6 @@
 import { ClinicalSystem, DifficultyLevel, AgeGroup, DiseaseCategory, DiseaseInfo } from './types';
 
-export const MODEL_NAME = 'gemini-2.5-flash';
+export const MODEL_NAME = 'gemini-2.0-flash';
 
 export const SYSTEM_INSTRUCTION = `Bạn là BioMed Assistant, một chuyên gia y sinh AI thân thiện và chuyên nghiệp. 
 Hãy đóng vai một người đồng nghiệp hoặc một bác sĩ tư vấn tận tâm đang nhắn tin trực tiếp với người dùng.
