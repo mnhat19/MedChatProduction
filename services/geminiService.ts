@@ -11,8 +11,8 @@ import { Message, CaseConfig, PatientInfo, TrainingSession, DiagnosisSubmission,
 const MODEL_FALLBACKS = [
   'gemini-2.0-flash',
   'gemini-2.0-flash-lite',
-  'gemini-1.5-flash-8b',
   'gemini-1.5-flash',
+  'gemini-1.5-pro',
 ];
 const MODEL_NAME = MODEL_FALLBACKS[0]; // exported constant kept for legacy use
 
@@ -25,6 +25,13 @@ const _isDailyQuota = (err: any): boolean => {
   const msg = String(err?.message ?? '').toLowerCase();
   // RESOURCE_EXHAUSTED = daily/total quota, not per-minute
   return msg.includes('billing') || msg.includes('exceeded your current quota') || msg.includes('resource_exhausted');
+};
+
+const _isModelNotFound = (err: any): boolean => {
+  const msg = String(err?.message ?? err ?? '').toLowerCase();
+  // 404 = model deprecated/unavailable — skip all combos for this model name
+  return msg.includes('not found') || msg.includes('not supported for generatecontent') ||
+    (msg.includes('404') && (msg.includes('model') || msg.includes('models/')));
 };
 
 class GeminiKeyManager {
@@ -97,10 +104,12 @@ const _sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
 async function withRetry<T>(fn: (client: GoogleGenerativeAI, model: string) => Promise<T>): Promise<T> {
   const km = getKm();
   const combos = km.getCombos();
+  const deprecatedModels = new Set<string>(); // 404 models to skip for this request
   let lastErr: any;
 
   for (const { key, model } of combos) {
     if (!km.isAvailable(key, model)) continue; // skip still-cooled combos
+    if (deprecatedModels.has(model)) continue;  // skip 404-known models
     try {
       return await fn(km.getClient(key), model);
     } catch (err: any) {
@@ -110,14 +119,129 @@ async function withRetry<T>(fn: (client: GoogleGenerativeAI, model: string) => P
         await _sleep(300); // tiny pause before trying next combo
         continue;
       }
-      throw err; // non-rate-limit error — propagate immediately
+      if (_isModelNotFound(err)) {
+        deprecatedModels.add(model);
+        console.warn(`[Gemini] Model ${model} returned 404 — skipping all its combos`);
+        lastErr = err;
+        continue;
+      }
+      throw err; // other errors — propagate immediately
     }
   }
 
-  // All combos exhausted
-  const friendly = new Error('Hệ thống đang bận (tất cả key đã hết giới hạn). Vui lòng thử lại sau ít phút.');
+  // All Gemini combos exhausted
+  const friendly = new Error('Hệ thống đang bận (tất cả Gemini key đã hết giới hạn). Vui lòng thử lại sau ít phút.');
   (friendly as any).isRateLimit = true;
   throw friendly;
+}
+
+// ── Groq fallback (OpenAI-compatible REST API — no SDK required) ──────────────
+// Activates automatically when all Gemini (key × model) combos are exhausted.
+// Set VITE_GROQ_API_KEY_1 / _2 / _3 in .env.local or Vercel environment vars.
+const GROQ_MODELS = ['llama-3.3-70b-versatile', 'llama-3.1-70b-versatile', 'llama3-70b-8192'];
+const GROQ_URL = 'https://api.groq.com/openai/v1/chat/completions';
+
+type GroqMsg = { role: 'system' | 'user' | 'assistant'; content: string };
+
+class GroqKeyManager {
+  readonly keys: string[];
+  private cooldowns = new Map<string, number>();
+
+  constructor() {
+    const e = import.meta.env;
+    this.keys = [e.VITE_GROQ_API_KEY_1, e.VITE_GROQ_API_KEY_2, e.VITE_GROQ_API_KEY_3]
+      .filter(Boolean) as string[];
+    if (this.keys.length) console.log(`[GroqKeyManager] ${this.keys.length} key(s) loaded`);
+  }
+
+  get available(): boolean { return this.keys.length > 0; }
+
+  isAvail(key: string, model: string): boolean {
+    return Date.now() >= (this.cooldowns.get(`${key}::${model}`) ?? 0);
+  }
+
+  markRL(key: string, model: string): void {
+    this.cooldowns.set(`${key}::${model}`, Date.now() + 65_000);
+    console.warn(`[Groq] Key …${key.slice(-6)} + ${model} cooled 65s`);
+  }
+
+  getCombos(): Array<{ key: string; model: string }> {
+    const all = GROQ_MODELS.flatMap(m => this.keys.map(k => ({ key: k, model: m })));
+    return [...all.filter(c => this.isAvail(c.key, c.model)), ...all.filter(c => !this.isAvail(c.key, c.model))];
+  }
+}
+
+let _groqKm: GroqKeyManager | null = null;
+const getGroqKm = (): GroqKeyManager | null => {
+  if (!_groqKm) _groqKm = new GroqKeyManager();
+  return _groqKm.available ? _groqKm : null;
+};
+
+/** Non-streaming Groq call — returns full response text. */
+async function groqComplete(messages: GroqMsg[]): Promise<string> {
+  const km = getGroqKm();
+  if (!km) throw Object.assign(new Error('Groq keys not configured'), { isConfigError: true });
+  let lastErr: any;
+  for (const { key, model } of km.getCombos()) {
+    if (!km.isAvail(key, model)) continue;
+    try {
+      console.log(`[Groq] Calling ${model}...`);
+      const resp = await fetch(GROQ_URL, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ model, messages, temperature: 0.7, max_tokens: 4096 }),
+      });
+      if (resp.status === 429) { km.markRL(key, model); lastErr = new Error('429'); await _sleep(300); continue; }
+      if (!resp.ok) throw new Error(`Groq HTTP ${resp.status}: ${await resp.text()}`);
+      return ((await resp.json()).choices[0].message.content) as string;
+    } catch (err: any) {
+      if (String(err?.message ?? '').includes('429')) { km.markRL(key, model); lastErr = err; continue; }
+      throw err;
+    }
+  }
+  throw lastErr ?? new Error('[Groq] All keys exhausted');
+}
+
+/** Streaming Groq call — calls onChunk for each token. */
+async function groqStream(messages: GroqMsg[], onChunk: (t: string) => void): Promise<void> {
+  const km = getGroqKm();
+  if (!km) throw Object.assign(new Error('Groq keys not configured'), { isConfigError: true });
+  let lastErr: any;
+  for (const { key, model } of km.getCombos()) {
+    if (!km.isAvail(key, model)) continue;
+    try {
+      console.log(`[Groq] Streaming ${model}...`);
+      const resp = await fetch(GROQ_URL, {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ model, messages, temperature: 0.7, max_tokens: 4096, stream: true }),
+      });
+      if (resp.status === 429) { km.markRL(key, model); lastErr = new Error('429'); await _sleep(300); continue; }
+      if (!resp.ok) throw new Error(`Groq stream HTTP ${resp.status}`);
+      const reader = resp.body!.getReader();
+      const dec = new TextDecoder();
+      let buf = '';
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buf += dec.decode(value, { stream: true });
+        const lines = buf.split('\n'); buf = lines.pop() ?? '';
+        for (const line of lines) {
+          if (!line.startsWith('data: ')) continue;
+          const payload = line.slice(6).trim();
+          if (payload === '[DONE]') return;
+          try { const t = JSON.parse(payload).choices?.[0]?.delta?.content; if (t) onChunk(t); } catch { /* ignore */ }
+        }
+      }
+      return; // success
+    } catch (err: any) {
+      if (String(err?.message ?? '').includes('429')) { km.markRL(key, model); lastErr = err; continue; }
+      throw err;
+    }
+  }
+  const ex = new Error('Hệ thống tạm thời quá tải (Gemini + Groq đều hết quota). Vui lòng thử lại sau vài giờ.');
+  (ex as any).isRateLimit = true;
+  throw ex;
 }
 
 export const sendMessageStream = async (
@@ -126,15 +250,10 @@ export const sendMessageStream = async (
   onChunk: (text: string) => void,
   patientInfo?: PatientInfo | null
 ) => {
-  try {
-    console.log('sendMessageStream called with:', { historyLength: history.length, message, hasPatientInfo: !!patientInfo });
-    
-    // Build system instruction based on context
-    let systemInstruction = SYSTEM_INSTRUCTION;
-    
-    if (patientInfo) {
-      // Virtual patient mode
-      const caseInfo = `
+  // Hoist systemInstruction so Groq fallback in catch can reuse it
+  let systemInstruction = SYSTEM_INSTRUCTION;
+  if (patientInfo) {
+    const caseInfo = `
 Thông tin bệnh nhân:
 - Tên: ${patientInfo.name}
 - Tuổi: ${patientInfo.age} ${patientInfo.ageUnit === 'years' ? 'tuổi' : patientInfo.ageUnit === 'months' ? 'tháng' : 'ngày'}
@@ -143,8 +262,11 @@ Thông tin bệnh nhân:
 - Hệ cơ quan: ${CLINICAL_SYSTEMS.find(s => s.value === patientInfo.clinicalSystem)?.label}
 - Mức độ phức tạp: ${DIFFICULTY_LEVELS.find(d => d.value === patientInfo.difficulty)?.label}
 `;
-      systemInstruction = VIRTUAL_PATIENT_INSTRUCTION.replace('{CASE_INFO}', caseInfo);
-    }
+    systemInstruction = VIRTUAL_PATIENT_INSTRUCTION.replace('{CASE_INFO}', caseInfo);
+  }
+
+  try {
+    console.log('sendMessageStream called with:', { historyLength: history.length, message, hasPatientInfo: !!patientInfo });
 
     // Retry only the initial stream setup (not the for-await loop)
     // to avoid calling onChunk twice if a 429 arrives mid-stream
@@ -171,6 +293,18 @@ Thông tin bệnh nhân:
       if (text) onChunk(text);
     }
   } catch (error: any) {
+    // ── Groq streaming fallback ──────────────────────────────────────
+    if (error?.isRateLimit && getGroqKm()) {
+      console.log('[Groq] Gemini exhausted — falling back to Groq for stream...');
+      const validHist = history.filter(m => !m.isError && m.content.trim() !== '');
+      const groqMsgs: GroqMsg[] = [
+        { role: 'system', content: systemInstruction },
+        ...validHist.map(m => ({ role: (m.role === 'user' ? 'user' : 'assistant') as GroqMsg['role'], content: m.content })),
+        { role: 'user', content: message },
+      ];
+      await groqStream(groqMsgs, onChunk);
+      return;
+    }
     console.error("Error in stream:", error?.message, error?.status);
     throw error;
   }
@@ -279,8 +413,30 @@ Hãy tạo một ca bệnh thực tế dựa trên bệnh lý trên. Trả về 
     };
   } catch (error) {
     console.error('Disease-based case generation error:', error);
+    // Try Groq before final hardcoded fallback
+    if ((error as any)?.isRateLimit && getGroqKm()) {
+      try {
+        const groqText = await groqComplete([{ role: 'user', content: prompt }]);
+        const jMatch = groqText.match(/\{[\s\S]*\}/);
+        if (jMatch) {
+          const cd = JSON.parse(jMatch[0]);
+          const cId = config.diseaseId || `RAG-${Date.now().toString(36).toUpperCase()}`;
+          return {
+            patientInfo: {
+              caseId: `${cId}-${Date.now().toString(36).toUpperCase()}`,
+              name, age, ageUnit, gender,
+              chiefComplaint: cd.chiefComplaint,
+              clinicalSystem: (cd.clinicalSystem as ClinicalSystem) || 'respiratory',
+              difficulty,
+              caseType: config.caseType,
+            },
+            openingMessage: cd.openingMessage,
+          };
+        }
+      } catch (groqErr) { console.error('[Groq] Disease-case fallback failed:', groqErr); }
+    }
     const caseId = config.diseaseId || `RAG-${Date.now().toString(36).toUpperCase()}`;
-    // Fallback case
+    // Hardcoded fallback
     const patientInfo: PatientInfo = {
       caseId: `${caseId}-${Date.now().toString(36).toUpperCase()}`,
       name,
@@ -416,7 +572,28 @@ Trả về JSON với format sau (chỉ trả về JSON, không có text khác):
     };
   } catch (error) {
     console.error('Case generation error:', error);
-    // Fallback case
+    // Try Groq before final hardcoded fallback
+    if ((error as any)?.isRateLimit && getGroqKm()) {
+      try {
+        const groqText = await groqComplete([{ role: 'user', content: prompt }]);
+        const jMatch = groqText.match(/\{[\s\S]*\}/);
+        if (jMatch) {
+          const cd = JSON.parse(jMatch[0]);
+          return {
+            patientInfo: {
+              caseId: `CASE-${Date.now().toString(36).toUpperCase()}`,
+              name, age, ageUnit, gender,
+              chiefComplaint: cd.chiefComplaint,
+              clinicalSystem: clinicalSystem!,
+              difficulty: difficulty!,
+              caseType: config.caseType,
+            },
+            openingMessage: cd.openingMessage,
+          };
+        }
+      } catch (groqErr) { console.error('[Groq] Case fallback failed:', groqErr); }
+    }
+    // Hardcoded fallback
     const patientInfo: PatientInfo = {
       caseId: `CASE-${Date.now().toString(36).toUpperCase()}`,
       name,
@@ -515,7 +692,32 @@ Hãy đánh giá và trả về JSON với format sau (chỉ trả về JSON):
     };
   } catch (error) {
     console.error('Evaluation error:', error);
-    // Fallback evaluation
+    // Try Groq before hardcoded fallback
+    if ((error as any)?.isRateLimit && getGroqKm()) {
+      try {
+        const groqText = await groqComplete([{ role: 'user', content: prompt }]);
+        const jMatch = groqText.match(/\{[\s\S]*\}/);
+        if (jMatch) {
+          const evalData = JSON.parse(jMatch[0]);
+          return {
+            overallScore: evalData.overallScore || 0,
+            maxScore: 100,
+            subScores: {
+              historyTaking: evalData.subScores?.historyTaking || 0,
+              physicalExamination: evalData.subScores?.physicalExamination || 0,
+              diagnosis: evalData.subScores?.diagnosis || 0,
+              managementPlan: evalData.subScores?.managementPlan || 0,
+            },
+            strengths: evalData.strengths || [],
+            weaknesses: evalData.weaknesses || [],
+            suggestions: evalData.suggestions || [],
+            detailedFeedback: evalData.detailedFeedback || '',
+            evaluatedAt: Date.now(),
+          };
+        }
+      } catch (groqErr) { console.error('[Groq] Evaluation fallback failed:', groqErr); }
+    }
+    // Hardcoded fallback evaluation
     return {
       overallScore: 50,
       maxScore: 100,
