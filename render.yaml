@@ -25,6 +25,8 @@ services:
         sync: false          # enter your key manually in Render → never stored in git
       - key: GROQ_API_KEY_2
         sync: false
+      - key: GROQ_API_KEY_3
+        sync: false
       - key: GROQ_MODEL
         value: llama-3.3-70b-versatile
       - key: GOOGLE_API_KEY

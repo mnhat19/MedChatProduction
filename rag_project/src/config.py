@@ -21,6 +21,7 @@ class Config:
     # Groq API keys (set in rag_project/.env)
     GROQ_API_KEY_1 = os.getenv('GROQ_API_KEY_1', '')
     GROQ_API_KEY_2 = os.getenv('GROQ_API_KEY_2', '')
+    GROQ_API_KEY_3 = os.getenv('GROQ_API_KEY_3', '')
 
     # Keep Google key in case frontend/other services need it
     GOOGLE_API_KEY = os.getenv('GOOGLE_API_KEY', '')

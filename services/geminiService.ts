@@ -4,19 +4,74 @@ import { Message, CaseConfig, PatientInfo, TrainingSession, DiagnosisSubmission,
 
 const MODEL_NAME = 'gemini-2.5-flash';
 
-let genAI: GoogleGenerativeAI | null = null;
-
-const getClient = () => {
-  if (!genAI) {
-    const apiKey = import.meta.env.VITE_GEMINI_API_KEY;
-    if (!apiKey) {
-      console.error("API Key not found in environment variables");
-      throw new Error("API Key missing");
-    }
-    genAI = new GoogleGenerativeAI(apiKey);
-  }
-  return genAI;
+// ── Gemini multi-key round-robin rotation ────────────────────────────────────
+const _isRateLimit = (err: any): boolean => {
+  const msg = String(err?.message ?? err ?? '').toLowerCase();
+  return err?.status === 429 || msg.includes('429') || msg.includes('quota') || msg.includes('rate limit');
 };
+
+class GeminiKeyManager {
+  private keys: string[];
+  private idx = 0;
+  private cooldowns = new Map<string, number>(); // key → expiry ms
+  private clients = new Map<string, GoogleGenerativeAI>();
+
+  constructor() {
+    const env = import.meta.env;
+    const candidates = [
+      env.VITE_GEMINI_API_KEY_1, env.VITE_GEMINI_API_KEY_2, env.VITE_GEMINI_API_KEY_3,
+      env.VITE_GEMINI_API_KEY, // legacy / single-key fallback
+    ].filter(Boolean) as string[];
+    this.keys = [...new Set(candidates)];
+    if (this.keys.length === 0) throw new Error('No VITE_GEMINI_API_KEY* env vars configured');
+    console.log(`[GeminiKeyManager] ${this.keys.length} key(s) loaded`);
+  }
+
+  currentKey(): string { return this.keys[this.idx % this.keys.length]; }
+
+  currentClient(): GoogleGenerativeAI {
+    const key = this.currentKey();
+    if (!this.clients.has(key)) this.clients.set(key, new GoogleGenerativeAI(key));
+    return this.clients.get(key)!;
+  }
+
+  rotate(): void {
+    const now = Date.now();
+    for (let i = 0; i < this.keys.length; i++) {
+      this.idx = (this.idx + 1) % this.keys.length;
+      if (now >= (this.cooldowns.get(this.currentKey()) ?? 0)) {
+        console.warn(`[GeminiKeyManager] Rotated to key index ${this.idx}`);
+        return;
+      }
+    }
+    console.warn('[GeminiKeyManager] All keys on cooldown, staying on current');
+  }
+
+  markRateLimited(key: string, cooldownMs = 65_000): void {
+    this.cooldowns.set(key, Date.now() + cooldownMs);
+    console.warn(`[GeminiKeyManager] Key …${key.slice(-6)} cooled for ${cooldownMs / 1000}s`);
+  }
+}
+
+const _km = new GeminiKeyManager();
+
+/** Retry up to 3 times, rotating Gemini key on each 429/quota error. */
+async function withRetry<T>(fn: () => Promise<T>): Promise<T> {
+  for (let i = 0; i < 3; i++) {
+    const key = _km.currentKey();
+    try {
+      return await fn();
+    } catch (err: any) {
+      if (_isRateLimit(err) && i < 2) {
+        _km.markRateLimited(key);
+        _km.rotate();
+        continue;
+      }
+      throw err;
+    }
+  }
+  throw new Error('[GeminiKeyManager] Unreachable');
+}
 
 export const sendMessageStream = async (
   history: Message[],
@@ -25,8 +80,9 @@ export const sendMessageStream = async (
   patientInfo?: PatientInfo | null
 ) => {
   try {
+    await withRetry(async () => {
     console.log('sendMessageStream called with:', { historyLength: history.length, message, hasPatientInfo: !!patientInfo });
-    const client = getClient();
+    const client = _km.currentClient();
     console.log('Client obtained');
     
     // Build system instruction based on context
@@ -83,6 +139,7 @@ Thông tin bệnh nhân:
       }
     }
     console.log('Stream completed');
+    }); // end withRetry
   } catch (error: any) {
     console.error("Error in stream:", error);
     console.error("Error details:", error?.message, error?.status, error?.statusText);
@@ -101,7 +158,7 @@ const getRandomElement = <T>(arr: T[]): T => arr[Math.floor(Math.random() * arr.
 
 // ============ Disease-Based Case Generation (RAG-enhanced) ============
 
-const generateDiseaseBasedCase = async (client: GoogleGenerativeAI, config: CaseConfig): Promise<GeneratedCase> => {
+const generateDiseaseBasedCase = async (config: CaseConfig): Promise<GeneratedCase> => {
   // First try to find in COMMON_DISEASES for extra info (sections, source)
   const disease = COMMON_DISEASES.find(d => d.id === config.diseaseId);
   
@@ -160,10 +217,11 @@ Hãy tạo một ca bệnh thực tế dựa trên bệnh lý trên. Trả về 
 }`;
 
   try {
-    const model = client.getGenerativeModel({ model: MODEL_NAME });
-    console.log('Generating disease-based case with Gemini...', diseaseName);
-    
-    const result = await model.generateContent(prompt);
+    const result = await withRetry(async () => {
+      const model = _km.currentClient().getGenerativeModel({ model: MODEL_NAME });
+      console.log('Generating disease-based case with Gemini...', diseaseName);
+      return model.generateContent(prompt);
+    });
     const text = result.response.text();
     console.log('Generated text:', text);
     
@@ -251,11 +309,9 @@ const vietnameseNames = {
 };
 
 export const generateCase = async (config: CaseConfig): Promise<GeneratedCase> => {
-  const client = getClient();
-  
   // Check if this is a disease-based case from RAG database
   if (config.diseaseId && config.diseaseName) {
-    return generateDiseaseBasedCase(client, config);
+    return generateDiseaseBasedCase(config);
   }
   
   // Determine case parameters
@@ -299,10 +355,11 @@ Trả về JSON với format sau (chỉ trả về JSON, không có text khác):
 }`;
 
   try {
-    const model = client.getGenerativeModel({ model: MODEL_NAME });
-    console.log('Generating case with Gemini...');
-    
-    const result = await model.generateContent(prompt);
+    const result = await withRetry(async () => {
+      const model = _km.currentClient().getGenerativeModel({ model: MODEL_NAME });
+      console.log('Generating case with Gemini...');
+      return model.generateContent(prompt);
+    });
     const text = result.response.text();
     console.log('Generated text:', text);
     
@@ -358,8 +415,6 @@ export const evaluateSession = async (
   session: TrainingSession,
   diagnosis: DiagnosisSubmission
 ): Promise<EvaluationResult> => {
-  const client = getClient();
-  
   const conversationText = session.messages
     .map(m => `${m.role === 'user' ? 'Sinh viên' : 'Bệnh nhân'}: ${m.content}`)
     .join('\n');
@@ -401,10 +456,11 @@ Hãy đánh giá và trả về JSON với format sau (chỉ trả về JSON):
 }`;
 
   try {
-    const model = client.getGenerativeModel({ model: MODEL_NAME });
-    console.log('Evaluating session with Gemini...');
-    
-    const result = await model.generateContent(prompt);
+    const result = await withRetry(async () => {
+      const model = _km.currentClient().getGenerativeModel({ model: MODEL_NAME });
+      console.log('Evaluating session with Gemini...');
+      return model.generateContent(prompt);
+    });
     const text = result.response.text();
     console.log('Evaluation response:', text);
     

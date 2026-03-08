@@ -13,7 +13,7 @@ def get_key_manager():
     global _KEY_MANAGER
     if _KEY_MANAGER is None:
         _KEY_MANAGER = GroqKeyManager(
-            keys=[Config.GROQ_API_KEY_1, Config.GROQ_API_KEY_2],
+            keys=[Config.GROQ_API_KEY_1, Config.GROQ_API_KEY_2, Config.GROQ_API_KEY_3],
             model=Config.GROQ_MODEL,
         )
     return _KEY_MANAGER

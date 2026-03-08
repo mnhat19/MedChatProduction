@@ -21,18 +21,24 @@ RUN pip install --no-cache-dir -r requirements_api.txt
 # Copy application files
 COPY . .
 
-# Set ownership
+# Pin HuggingFace cache inside /app so the sentence-transformer model is
+# downloaded once during `docker build` and baked into the image layer.
+# This eliminates cold-start latency on HuggingFace Spaces restarts.
+ENV HF_HOME=/app/.hf_cache
+ENV TRANSFORMERS_CACHE=/app/.hf_cache/transformers
+
+# Set ownership (includes .hf_cache written by the build step below)
 RUN chown -R appuser:appuser /app
 
 USER appuser
 
-# Pre-build FAISS index at image build time (bakes the 4.4 MB index in)
-# Sentence-transformer model is downloaded here and cached in /home/appuser/.cache
+# Pre-build FAISS index + download the embedding model into /app/.hf_cache
 RUN python src/build_faiss.py
 
 # Environment defaults (override via HF Space secrets)
 ENV GROQ_API_KEY_1=""
 ENV GROQ_API_KEY_2=""
+ENV GROQ_API_KEY_3=""
 ENV GROQ_MODEL="llama-3.3-70b-versatile"
 ENV ALLOWED_ORIGINS="*"
 ENV PORT=7860

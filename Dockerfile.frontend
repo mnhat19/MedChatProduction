@@ -8,9 +8,15 @@ RUN npm ci
 
 # Copy source and build
 COPY . .
-# VITE_GEMINI_API_KEY must be passed as build-arg for frontend-only Gemini calls
-ARG VITE_GEMINI_API_KEY
-ENV VITE_GEMINI_API_KEY=$VITE_GEMINI_API_KEY
+# Vite bakes VITE_* vars into the JS bundle at build time — pass both keys as build-args
+ARG VITE_GEMINI_API_KEY_1
+ARG VITE_GEMINI_API_KEY_2
+ARG VITE_GEMINI_API_KEY_3
+ARG VITE_RAG_API_URL
+ENV VITE_GEMINI_API_KEY_1=$VITE_GEMINI_API_KEY_1
+ENV VITE_GEMINI_API_KEY_2=$VITE_GEMINI_API_KEY_2
+ENV VITE_GEMINI_API_KEY_3=$VITE_GEMINI_API_KEY_3
+ENV VITE_RAG_API_URL=$VITE_RAG_API_URL
 RUN npm run build
 
 # ── Stage 2: Serve with Nginx ─────────────────────────────────────────────────
