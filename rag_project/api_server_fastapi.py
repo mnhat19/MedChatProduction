@@ -15,6 +15,7 @@ sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', errors='repla
 sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', errors='replace')
 
 import asyncio
+import threading
 
 from fastapi import FastAPI, HTTPException, Depends, Security
 from fastapi.middleware.cors import CORSMiddleware
@@ -37,6 +38,60 @@ from rag_chain import RAGChain
 from session_store import SessionStore
 from disease_cache import DiseaseCache
 
+# ── Background initialization ─────────────────────────────────────────────────
+# Heavy work (model load + FAISS) runs in a background thread so uvicorn binds
+# port 7860 immediately — HF Spaces sees the port up and marks the Space as
+# "Running" within seconds, while initialization continues in the background.
+
+vs_manager: VectorStoreManager = None   # type: ignore[assignment]
+rag: RAGChain = None                    # type: ignore[assignment]
+evaluator: DoctorEvaluator = None       # type: ignore[assignment]
+session_store: SessionStore = None      # type: ignore[assignment]
+disease_cache: DiseaseCache = None      # type: ignore[assignment]
+
+_init_done = threading.Event()   # set when initialization finishes
+_init_error: Exception = None    # set if initialization fails
+
+
+def _background_init():
+    global vs_manager, rag, evaluator, session_store, disease_cache, _init_error
+    try:
+        print("[*] Initializing RAG system in background thread...")
+        vs_manager = VectorStoreManager()
+        if not vs_manager.vector_store:
+            raise RuntimeError("FAISS index not found — run: python src/build_faiss.py")
+        rag = RAGChain(vs_manager)
+        evaluator = DoctorEvaluator(rag)
+        session_store = SessionStore()
+        session_store.cleanup_expired()
+        disease_cache = DiseaseCache()
+        print("[OK] RAG system ready!")
+    except Exception as exc:
+        _init_error = exc
+        print(f"[ERROR] Background initialization failed: {exc}")
+        import traceback; traceback.print_exc()
+    finally:
+        _init_done.set()
+
+
+# Start immediately — server is up before this finishes
+threading.Thread(target=_background_init, daemon=True, name="rag-init").start()
+
+
+def _require_ready():
+    """FastAPI dependency: return 503 while initialization is in progress."""
+    if not _init_done.is_set():
+        raise HTTPException(status_code=503, detail="Service is initializing, please retry in a moment")
+    if _init_error:
+        raise HTTPException(status_code=500, detail=f"Initialization failed: {_init_error}")
+
+
+# Configure CORS — restrict to known frontend origins via ALLOWED_ORIGINS env var.
+# Default "*" so HuggingFace Spaces / fresh deploys work without manual config.
+# For production hardening, set ALLOWED_ORIGINS=https://your-app.vercel.app
+_allowed_origins_env = os.getenv("ALLOWED_ORIGINS", "*")
+ALLOWED_ORIGINS = [o.strip() for o in _allowed_origins_env.split(",") if o.strip()]
+
 app = FastAPI(
     title="Medical RAG API",
     description="RAG-based Medical Diagnosis Assistant",
@@ -44,12 +99,6 @@ app = FastAPI(
     docs_url="/docs",
     redoc_url="/redoc"
 )
-
-# Configure CORS — restrict to known frontend origins via ALLOWED_ORIGINS env var.
-# Default "*" so HuggingFace Spaces / fresh deploys work without manual config.
-# For production hardening, set ALLOWED_ORIGINS=https://your-app.vercel.app
-_allowed_origins_env = os.getenv("ALLOWED_ORIGINS", "*")
-ALLOWED_ORIGINS = [o.strip() for o in _allowed_origins_env.split(",") if o.strip()]
 
 app.add_middleware(
     CORSMiddleware,
@@ -69,24 +118,6 @@ async def verify_api_key(api_key: str = Security(_api_key_header)):
     if _API_SECRET_KEY and api_key != _API_SECRET_KEY:
         raise HTTPException(status_code=403, detail="Invalid or missing API key")
     return api_key
-
-# Initialize RAG system
-print("[*] Initializing RAG system...")
-vs_manager = VectorStoreManager()
-if not vs_manager.vector_store:
-    print("[ERROR] FAISS index not found. Run: python build_faiss.py")
-    sys.exit(1)
-
-rag = RAGChain(vs_manager)
-evaluator = DoctorEvaluator(rag)
-print("[OK] RAG system ready!")
-
-# Persistent session store (SQLite)
-session_store = SessionStore()
-session_store.cleanup_expired()   # remove stale sessions from previous runs
-
-# Disease-level result cache (7-day TTL, avoids repeating RAG queries for same disease)
-disease_cache = DiseaseCache()
 
 
 # Pydantic models for request/response
@@ -154,7 +185,19 @@ async def root():
 
 @app.get("/api/health", response_model=HealthResponse)
 async def health_check():
-    """Health check endpoint"""
+    """Health check endpoint — always returns 200 so HF Spaces marks Space as Running."""
+    if not _init_done.is_set():
+        return HealthResponse(
+            status='loading',
+            message='RAG system is initializing, please wait...',
+            embedding_model=Config.EMBEDDING_MODEL
+        )
+    if _init_error:
+        return HealthResponse(
+            status='error',
+            message=f'Initialization failed: {_init_error}',
+            embedding_model=Config.EMBEDDING_MODEL
+        )
     return HealthResponse(
         status='healthy',
         message='FastAPI RAG Server is running',
@@ -162,7 +205,7 @@ async def health_check():
     )
 
 
-@app.get("/api/diseases", response_model=DiseasesResponse)
+@app.get("/api/diseases", response_model=DiseasesResponse, dependencies=[Depends(_require_ready)])
 async def get_diseases(
     category: Optional[str] = None,
     search: Optional[str] = None
@@ -221,7 +264,7 @@ async def get_diseases(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.post("/api/start-case", response_model=StartCaseResponse, dependencies=[Depends(verify_api_key)])
+@app.post("/api/start-case", response_model=StartCaseResponse, dependencies=[Depends(verify_api_key), Depends(_require_ready)])
 async def start_case(request: StartCaseRequest):
     """
     1. find_symptoms() + get_detailed_standard_knowledge() run IN PARALLEL
@@ -309,7 +352,7 @@ async def start_case(request: StartCaseRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.post("/api/evaluate", response_model=EvaluateResponse, dependencies=[Depends(verify_api_key)])
+@app.post("/api/evaluate", response_model=EvaluateResponse, dependencies=[Depends(verify_api_key), Depends(_require_ready)])
 async def evaluate_diagnosis(request: EvaluateRequest):
     """
     Nhận câu trả lời user, so sánh với đáp án chuẩn đã có trong session
