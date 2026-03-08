@@ -145,6 +145,13 @@ class EvaluateResponse(BaseModel):
     sources: List[Dict[str, str]]
 
 
+@app.get("/", include_in_schema=False)
+async def root():
+    """Root redirect to API docs"""
+    from fastapi.responses import RedirectResponse
+    return RedirectResponse(url="/docs")
+
+
 @app.get("/api/health", response_model=HealthResponse)
 async def health_check():
     """Health check endpoint"""

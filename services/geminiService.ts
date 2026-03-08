@@ -2,18 +2,35 @@ import { GoogleGenerativeAI } from "@google/generative-ai";
 import { SYSTEM_INSTRUCTION, VIRTUAL_PATIENT_INSTRUCTION, EVALUATOR_INSTRUCTION, CLINICAL_SYSTEMS, DIFFICULTY_LEVELS, COMMON_DISEASES } from "../constants";
 import { Message, CaseConfig, PatientInfo, TrainingSession, DiagnosisSubmission, EvaluationResult, ClinicalSystem, DifficultyLevel, AgeGroup } from "../types";
 
-const MODEL_NAME = 'gemini-2.0-flash';
+// ── Model fallback cascade ───────────────────────────────────────────────────
+// Try models in order; each has independent quota even for the same API key.
+// gemini-2.0-flash: 15 RPM, 1500 RPD  (primary)
+// gemini-2.0-flash-lite: 30 RPM, 1500 RPD (lighter quota pool)
+// gemini-1.5-flash-8b: 15 RPM, 1500 RPD
+// gemini-1.5-flash:  15 RPM, 1500 RPD  (last resort)
+const MODEL_FALLBACKS = [
+  'gemini-2.0-flash',
+  'gemini-2.0-flash-lite',
+  'gemini-1.5-flash-8b',
+  'gemini-1.5-flash',
+];
+const MODEL_NAME = MODEL_FALLBACKS[0]; // exported constant kept for legacy use
 
-// ── Gemini multi-key round-robin rotation ────────────────────────────────────
+// ── Gemini multi-key + multi-model rotation ───────────────────────────────────
 const _isRateLimit = (err: any): boolean => {
   const msg = String(err?.message ?? err ?? '').toLowerCase();
   return err?.status === 429 || msg.includes('429') || msg.includes('quota') || msg.includes('rate limit');
 };
+const _isDailyQuota = (err: any): boolean => {
+  const msg = String(err?.message ?? '').toLowerCase();
+  // RESOURCE_EXHAUSTED = daily/total quota, not per-minute
+  return msg.includes('billing') || msg.includes('exceeded your current quota') || msg.includes('resource_exhausted');
+};
 
 class GeminiKeyManager {
   private keys: string[];
-  private idx = 0;
-  private cooldowns = new Map<string, number>(); // key → expiry ms
+  // cooldowns keyed as `key::model` → expiry timestamp
+  private cooldowns = new Map<string, number>();
   private clients = new Map<string, GoogleGenerativeAI>();
 
   constructor() {
@@ -31,29 +48,35 @@ class GeminiKeyManager {
     console.log(`[GeminiKeyManager] ${this.keys.length} key(s) loaded`);
   }
 
-  currentKey(): string { return this.keys[this.idx % this.keys.length]; }
-
-  currentClient(): GoogleGenerativeAI {
-    const key = this.currentKey();
+  getClient(key: string): GoogleGenerativeAI {
     if (!this.clients.has(key)) this.clients.set(key, new GoogleGenerativeAI(key));
     return this.clients.get(key)!;
   }
 
-  rotate(): void {
-    const now = Date.now();
-    for (let i = 0; i < this.keys.length; i++) {
-      this.idx = (this.idx + 1) % this.keys.length;
-      if (now >= (this.cooldowns.get(this.currentKey()) ?? 0)) {
-        console.warn(`[GeminiKeyManager] Rotated to key index ${this.idx}`);
-        return;
-      }
-    }
-    console.warn('[GeminiKeyManager] All keys on cooldown, staying on current');
+  isAvailable(key: string, model: string): boolean {
+    return Date.now() >= (this.cooldowns.get(`${key}::${model}`) ?? 0);
   }
 
-  markRateLimited(key: string, cooldownMs = 65_000): void {
-    this.cooldowns.set(key, Date.now() + cooldownMs);
-    console.warn(`[GeminiKeyManager] Key …${key.slice(-6)} cooled for ${cooldownMs / 1000}s`);
+  markRateLimited(key: string, model: string, isDaily: boolean): void {
+    // Daily quota runs out until midnight — use 2-hour cooldown so we don't hammer
+    // Per-minute rate limits reset in ~60s — use 65s cooldown
+    const cooldownMs = isDaily ? 2 * 60 * 60 * 1000 : 65_000;
+    this.cooldowns.set(`${key}::${model}`, Date.now() + cooldownMs);
+    console.warn(`[Gemini] Key …${key.slice(-6)} + ${model} cooled ${isDaily ? '2hr (daily quota)' : '65s (RPM)'}`);
+  }
+
+  /** Returns all (key, model) pairs in priority order, skipping cooled-down combos first. */
+  getCombos(): Array<{ key: string; model: string }> {
+    const all: Array<{ key: string; model: string }> = [];
+    for (const model of MODEL_FALLBACKS) {
+      for (const key of this.keys) {
+        all.push({ key, model });
+      }
+    }
+    // Available combos first, cooled-down combos appended at end as last resort
+    const available = all.filter(c => this.isAvailable(c.key, c.model));
+    const cooled   = all.filter(c => !this.isAvailable(c.key, c.model));
+    return [...available, ...cooled];
   }
 }
 
@@ -66,30 +89,35 @@ const getKm = (): GeminiKeyManager => {
 
 const _sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
 
-/** Retry up to 3 times, rotating Gemini key + brief back-off on each 429/quota error. */
-async function withRetry<T>(fn: () => Promise<T>): Promise<T> {
+/**
+ * Try all (key, model) combinations in cascade order.
+ * fn receives the GoogleGenerativeAI client and the active model name.
+ * On 429 the combo is cooled down and the next one is tried immediately.
+ */
+async function withRetry<T>(fn: (client: GoogleGenerativeAI, model: string) => Promise<T>): Promise<T> {
   const km = getKm();
-  for (let i = 0; i < 3; i++) {
-    const key = km.currentKey();
+  const combos = km.getCombos();
+  let lastErr: any;
+
+  for (const { key, model } of combos) {
+    if (!km.isAvailable(key, model)) continue; // skip still-cooled combos
     try {
-      return await fn();
+      return await fn(km.getClient(key), model);
     } catch (err: any) {
-      if (_isRateLimit(err) && i < 2) {
-        km.markRateLimited(key);
-        km.rotate();
-        await _sleep(2000 * (i + 1)); // 2s, then 4s back-off
+      if (_isRateLimit(err)) {
+        km.markRateLimited(key, model, _isDailyQuota(err));
+        lastErr = err;
+        await _sleep(300); // tiny pause before trying next combo
         continue;
       }
-      // Wrap rate-limit errors with a friendlier message
-      if (_isRateLimit(err)) {
-        const friendly = new Error('Hệ thống đang bận, vui lòng thử lại sau vài giây. (Rate limit)');
-        (friendly as any).isRateLimit = true;
-        throw friendly;
-      }
-      throw err;
+      throw err; // non-rate-limit error — propagate immediately
     }
   }
-  throw new Error('[GeminiKeyManager] Unreachable');
+
+  // All combos exhausted
+  const friendly = new Error('Hệ thống đang bận (tất cả key đã hết giới hạn). Vui lòng thử lại sau ít phút.');
+  (friendly as any).isRateLimit = true;
+  throw friendly;
 }
 
 export const sendMessageStream = async (
@@ -100,7 +128,6 @@ export const sendMessageStream = async (
 ) => {
   try {
     console.log('sendMessageStream called with:', { historyLength: history.length, message, hasPatientInfo: !!patientInfo });
-    const km = getKm();
     
     // Build system instruction based on context
     let systemInstruction = SYSTEM_INSTRUCTION;
@@ -121,9 +148,8 @@ Thông tin bệnh nhân:
 
     // Retry only the initial stream setup (not the for-await loop)
     // to avoid calling onChunk twice if a 429 arrives mid-stream
-    const result = await withRetry(async () => {
-      const client = km.currentClient();
-      const model = client.getGenerativeModel({ model: MODEL_NAME, systemInstruction });
+    const result = await withRetry(async (client, modelName) => {
+      const genModel = client.getGenerativeModel({ model: modelName, systemInstruction });
 
       let chatHistory = history
         .filter(m => !m.isError && m.content.trim() !== '')
@@ -136,7 +162,7 @@ Thông tin bệnh nhân:
         chatHistory = chatHistory.slice(1);
       }
 
-      const chat = model.startChat({ history: chatHistory });
+      const chat = genModel.startChat({ history: chatHistory });
       return chat.sendMessageStream(message);
     });
 
@@ -220,10 +246,9 @@ Hãy tạo một ca bệnh thực tế dựa trên bệnh lý trên. Trả về 
 }`;
 
   try {
-    const result = await withRetry(async () => {
-      const model = getKm().currentClient().getGenerativeModel({ model: MODEL_NAME });
-      console.log('Generating disease-based case with Gemini...', diseaseName);
-      return model.generateContent(prompt);
+    const result = await withRetry(async (client, modelName) => {
+      console.log('Generating disease-based case with Gemini...', diseaseName, 'model:', modelName);
+      return client.getGenerativeModel({ model: modelName }).generateContent(prompt);
     });
     const text = result.response.text();
     console.log('Generated text:', text);
@@ -358,10 +383,9 @@ Trả về JSON với format sau (chỉ trả về JSON, không có text khác):
 }`;
 
   try {
-    const result = await withRetry(async () => {
-      const model = getKm().currentClient().getGenerativeModel({ model: MODEL_NAME });
-      console.log('Generating case with Gemini...');
-      return model.generateContent(prompt);
+    const result = await withRetry(async (client, modelName) => {
+      console.log('Generating case with Gemini... model:', modelName);
+      return client.getGenerativeModel({ model: modelName }).generateContent(prompt);
     });
     const text = result.response.text();
     console.log('Generated text:', text);
@@ -459,10 +483,9 @@ Hãy đánh giá và trả về JSON với format sau (chỉ trả về JSON):
 }`;
 
   try {
-    const result = await withRetry(async () => {
-      const model = getKm().currentClient().getGenerativeModel({ model: MODEL_NAME });
-      console.log('Evaluating session with Gemini...');
-      return model.generateContent(prompt);
+    const result = await withRetry(async (client, modelName) => {
+      console.log('Evaluating session with Gemini... model:', modelName);
+      return client.getGenerativeModel({ model: modelName }).generateContent(prompt);
     });
     const text = result.response.text();
     console.log('Evaluation response:', text);
